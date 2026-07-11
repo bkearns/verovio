@@ -66,6 +66,31 @@ if "96" not in "".join(tempo.itertext()):
     raise SystemExit("expected 96 in tempo SVG group")
 PY
 
+jq '.score.conductorTrack.measures[0].events = [{
+        id:"rehearsal-a", onset:[0,1], duration:[0,1], order:0, kind:"rehearsal", value:"A",
+        rehearsal:{enclosure:"circle"}
+    }]
+    | .score.parts[0].measures[0].conductorEventRefs = ["rehearsal-a"]
+    | .score.parts[0].measures[0].measureEvents += [{
+        type:"directionRef", id:"rehearsal-a-ref", onset:[0,1], duration:[0,1], order:0,
+        conductorEventRef:"rehearsal-a", staffId:"staff-1", placement:"above"
+    }]' "$fixture" >"$tmp/rehearsal-circle.jsm"
+"$verovio" -r "$repo/data" -f jsm -o "$tmp/rehearsal-circle.svg" "$tmp/rehearsal-circle.jsm"
+python3 - "$tmp/rehearsal-circle.svg" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+rehearsal = next(
+    element for element in root.iter() if "reh" in element.attrib.get("class", "").split()
+)
+tags = [element.tag.rsplit("}", 1)[-1] for element in rehearsal.iter()]
+if "ellipse" not in tags:
+    raise SystemExit("expected circle rehearsal enclosure to render an SVG ellipse")
+if "rect" in tags:
+    raise SystemExit("circle rehearsal enclosure rendered an SVG rect")
+PY
+
 jq '.score.parts[0] as $source
     | [$source | .. | objects | .id? // empty] as $ids
     | (reduce $ids[] as $id ($source;

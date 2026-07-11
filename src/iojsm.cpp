@@ -834,7 +834,9 @@ namespace {
             rehearsal->SetPlace(Placement(reference));
             rehearsal->SetStaff(staffNumbers);
             Rend *rend = new Rend();
-            rend->SetRend(TEXTRENDITION_box);
+            const JObject *rehearsalSource = ObjectAt(conductor, "rehearsal", "/score/conductorTrack/events", false);
+            const std::string enclosure = rehearsalSource ? rehearsalSource->get<jsonxx::String>("enclosure", "") : "";
+            rend->SetRend(enclosure == "circle" ? TEXTRENDITION_circle : TEXTRENDITION_box);
             Text *text = new Text();
             text->SetText(UTF8to32(conductor.get<jsonxx::String>("value")));
             rend->AddChild(text);
