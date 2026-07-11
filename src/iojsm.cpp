@@ -3,6 +3,13 @@
 // Purpose:     Native JSM input adapter
 /////////////////////////////////////////////////////////////////////////////
 
+/**
+ * Module: Decode canonical JSM into Verovio's native score model.
+ * Correctness: Native JSM and its MusicXML projection engrave identically for supported notation fixtures.
+ * Last revised: 2026-07-10
+ * Last changed: Added exact clef, meter, and measure-boundary context decoding.
+ */
+
 #include "iojsm.h"
 
 #include <algorithm>
@@ -99,6 +106,23 @@ int IntAt(const JObject &parent, const std::string &key, int fallback)
         || value < std::numeric_limits<int>::min() || value > std::numeric_limits<int>::max())
         return fallback;
     return static_cast<int>(value);
+}
+
+bool IntegerAt(const JObject &parent, const std::string &key, const std::string &path, int &value,
+    bool required = true, int fallback = 0)
+{
+    if (!parent.has<jsonxx::Number>(key)) {
+        if (required) return Fail("JSM_REQUIRED_INTEGER", path + "/" + key, "expected integer");
+        value = fallback;
+        return true;
+    }
+    const long double source = parent.get<jsonxx::Number>(key);
+    if (!std::isfinite(static_cast<double>(source)) || source != std::floor(source)
+        || source < std::numeric_limits<int>::min() || source > std::numeric_limits<int>::max()) {
+        return Fail("JSM_INVALID_INTEGER", path + "/" + key, "expected integer");
+    }
+    value = static_cast<int>(source);
+    return true;
 }
 
 bool BoolAt(const JObject &parent, const std::string &key, bool fallback)
@@ -405,6 +429,18 @@ const JObject *InitialContext(const JObject &part)
     return contexts->has<JObject>(0) ? &contexts->get<JObject>(0) : nullptr;
 }
 
+const JObject *ContextById(const JObject &part, const std::string &contextId)
+{
+    const JArray *contexts = ArrayAt(part, "contexts", "/score/parts", false);
+    if (!contexts) return nullptr;
+    for (unsigned int i = 0; i < contexts->size(); ++i) {
+        if (!contexts->has<JObject>(i)) continue;
+        const JObject &context = contexts->get<JObject>(i);
+        if (context.has<jsonxx::String>("id") && context.get<jsonxx::String>("id") == contextId) return &context;
+    }
+    return nullptr;
+}
+
 void AddTextLines(Object *parent, const std::string &value)
 {
     std::stringstream stream(value);
@@ -631,11 +667,115 @@ bool AddDirectionRef(const JObject &reference, const JObject &conductor, const s
     return true;
 }
 
-void AddInitialContext(StaffDef *staffDef, const JObject &part, const std::string &staffId, bool &meterAdded,
+bool AddClef(Object *parent, const JObject &source, const std::string &path, bool materializeNone = false)
+{
+    const std::string sign = source.get<jsonxx::String>("sign", "G");
+    if (sign == "none" && !materializeNone) return true;
+    Clef *clef = new Clef();
+    if (sign == "none") clef->SetShape(CLEFSHAPE_NONE);
+    else if (sign == "G") clef->SetShape(CLEFSHAPE_G);
+    else if (sign == "F") clef->SetShape(CLEFSHAPE_F);
+    else if (sign == "C") clef->SetShape(CLEFSHAPE_C);
+    else if (sign == "percussion") clef->SetShape(CLEFSHAPE_perc);
+    else {
+        delete clef;
+        return Fail("JSM_UNSUPPORTED_CLEF", path + "/sign", sign);
+    }
+    if (sign != "none" && sign != "percussion") clef->SetLine(IntAt(source, "line", sign == "F" ? 4 : 2));
+    int octaveChange = 0;
+    if (!IntegerAt(source, "octaveChange", path, octaveChange, false)) {
+        delete clef;
+        return false;
+    }
+    switch (std::abs(octaveChange)) {
+        case 0: break;
+        case 1: clef->SetDis(OCTAVE_DIS_8); break;
+        case 2: clef->SetDis(OCTAVE_DIS_15); break;
+        case 3: clef->SetDis(OCTAVE_DIS_22); break;
+        default:
+            delete clef;
+            return Fail("JSM_UNSUPPORTED_CLEF", path + "/octaveChange", "expected an integer from -3 through 3");
+    }
+    if (octaveChange < 0) clef->SetDisPlace(STAFFREL_basic_below);
+    else if (octaveChange > 0) clef->SetDisPlace(STAFFREL_basic_above);
+    parent->AddChild(clef);
+    return true;
+}
+
+bool AddKeySig(Object *parent, const JObject &key, const std::string &path)
+{
+    int fifths = 0;
+    if (!IntegerAt(key, "fifths", path, fifths)) return false;
+    if (fifths < -7 || fifths > 7) return Fail("JSM_UNSUPPORTED_KEY", path + "/fifths", "expected -7 through 7");
+    KeySig *keySig = new KeySig();
+    keySig->SetSig({ std::abs(fifths), fifths < 0 ? ACCIDENTAL_WRITTEN_f : ACCIDENTAL_WRITTEN_s });
+    if (key.has<jsonxx::String>("mode")) {
+        const std::string mode = key.get<jsonxx::String>("mode");
+        const data_MODE parsedMode = keySig->AttKeySigAnl::StrToMode(mode, false);
+        if (parsedMode == MODE_NONE && mode != "none") {
+            delete keySig;
+            return Fail("JSM_UNSUPPORTED_KEY", path + "/mode", mode);
+        }
+        keySig->SetMode(parsedMode);
+    }
+    parent->AddChild(keySig);
+    return true;
+}
+
+bool AddMeter(Object *parent, const JObject &time, const std::string &path)
+{
+    const std::string symbol = time.get<jsonxx::String>("symbol", "");
+    if (!symbol.empty() && symbol != "common" && symbol != "cut" && symbol != "senza-misura") {
+        return Fail("JSM_UNSUPPORTED_METER", path + "/symbol", symbol);
+    }
+    MeterSig *meter = new MeterSig();
+    if (symbol == "common") meter->SetSym(METERSIGN_common);
+    else if (symbol == "cut") meter->SetSym(METERSIGN_cut);
+    else if (symbol == "senza-misura") {
+        meter->SetVisible(BOOLEAN_false);
+        meter->SetForm(METERFORM_norm);
+    }
+    if (symbol != "senza-misura") {
+        const JArray *beats = ArrayAt(time, "beats", path, false);
+        if (!beats || beats->empty()) {
+            delete meter;
+            return Fail("JSM_INVALID_METER", path + "/beats", "expected at least one beat group");
+        }
+        std::vector<int> count;
+        for (unsigned int i = 0; i < beats->size(); ++i) {
+            if (!beats->has<jsonxx::Number>(i)) {
+                delete meter;
+                return Fail("JSM_INVALID_METER", path + "/beats", "expected integer beat groups");
+            }
+            const long double value = beats->get<jsonxx::Number>(i);
+            if (!std::isfinite(static_cast<double>(value)) || value != std::floor(value) || value <= 0
+                || value > std::numeric_limits<int>::max()) {
+                delete meter;
+                return Fail("JSM_INVALID_METER", path + "/beats", "beat groups must be positive");
+            }
+            count.push_back(static_cast<int>(value));
+        }
+        int beatType = 0;
+        if (!IntegerAt(time, "beatType", path, beatType)) {
+            delete meter;
+            return false;
+        }
+        if (beatType <= 0) {
+            delete meter;
+            return Fail("JSM_INVALID_METER", path + "/beatType", "expected a positive integer");
+        }
+        meter->SetCount({ count, count.size() > 1 ? MeterCountSign::Plus : MeterCountSign::None });
+        meter->SetUnit(beatType);
+    }
+    parent->AddChild(meter);
+    return true;
+}
+
+bool AddInitialContext(StaffDef *staffDef, const JObject &part, const std::string &staffId, bool &meterAdded,
     ScoreDef *scoreDef)
 {
     const JObject *initial = InitialContext(part);
-    if (!initial) return;
+    if (!initial) return true;
     const JObject &context = *initial;
     const JArray *contextStaves = ArrayAt(context, "staves", "/score/parts/contexts", false);
     if (contextStaves) {
@@ -644,41 +784,21 @@ void AddInitialContext(StaffDef *staffDef, const JObject &part, const std::strin
             const JObject &contextStaff = contextStaves->get<JObject>(i);
             if (!contextStaff.has<jsonxx::String>("staffId") || contextStaff.get<jsonxx::String>("staffId") != staffId)
                 continue;
-            const JObject *clefSource = ObjectAt(contextStaff, "clef", "/score/parts/contexts/staves", false);
-            if (!clefSource) break;
-            const std::string sign = clefSource->get<jsonxx::String>("sign", "G");
-            Clef *clef = new Clef();
-            clef->SetShape(sign == "F" ? CLEFSHAPE_F : (sign == "C" ? CLEFSHAPE_C : CLEFSHAPE_G));
-            clef->SetLine(IntAt(*clefSource, "line", sign == "F" ? 4 : 2));
-            clef->IsAttribute(true);
-            staffDef->AddChild(clef);
+            const JObject *clef = ObjectAt(contextStaff, "clef", "/score/parts/contexts/staves", false);
+            if (clef && !AddClef(staffDef, *clef, "/score/parts/contexts/staves/clef")) return false;
             break;
         }
     }
     const JObject *key = ObjectAt(context, "key", "/score/parts/contexts", false);
-    if (key) {
-        const int fifths = IntAt(*key, "fifths", 0);
-        KeySig *keySig = new KeySig();
-        keySig->SetSig({ std::abs(fifths), fifths < 0 ? ACCIDENTAL_WRITTEN_f : ACCIDENTAL_WRITTEN_s });
-        keySig->IsAttribute(true);
-        staffDef->AddChild(keySig);
-    }
+    if (key && !AddKeySig(staffDef, *key, "/score/parts/contexts/key")) return false;
     if (!meterAdded) {
         const JObject *time = ObjectAt(context, "time", "/score/parts/contexts", false);
-        const JArray *beats = time ? ArrayAt(*time, "beats", "/score/parts/contexts/time", false) : nullptr;
-        if (time && beats && !beats->empty() && beats->has<jsonxx::Number>(0)) {
-            std::vector<int> count;
-            for (unsigned int i = 0; i < beats->size(); ++i) {
-                if (beats->has<jsonxx::Number>(i)) count.push_back(static_cast<int>(beats->get<jsonxx::Number>(i)));
-            }
-            MeterSig *meter = new MeterSig();
-            meter->SetCount({ count, MeterCountSign::None });
-            meter->SetUnit(IntAt(*time, "beatType", 4));
-            meter->IsAttribute(true);
-            scoreDef->AddChild(meter);
+        if (time) {
+            if (!AddMeter(scoreDef, *time, "/score/parts/contexts/time")) return false;
             meterAdded = true;
         }
     }
+    return true;
 }
 
 int InitialFifths(const JObject &part)
@@ -1381,7 +1501,7 @@ bool JsmInput::Import(const std::string &data)
             if (!partStaffGrp) AddPartLabels(staffDef, part);
             AddTranspositionAndPpq(staffDef, part, ppq);
             (partStaffGrp ? static_cast<Object *>(partStaffGrp) : static_cast<Object *>(staffGrp))->AddChild(staffDef);
-            AddInitialContext(staffDef, part, staffId, meterAdded, score->GetScoreDef());
+            if (!AddInitialContext(staffDef, part, staffId, meterAdded, score->GetScoreDef())) return false;
             staffBindings.emplace(
                 staffId, StaffBinding { nextStaff, partId, staffId, InitialFifths(part), InitialContextId(part) });
             ++nextStaff;
@@ -1422,6 +1542,21 @@ bool JsmInput::Import(const std::string &data)
             section->AddChild(new Pb());
         }
     }
+    std::string activeMeter;
+    bool activeMeterSet = false;
+    for (unsigned int partIndex = 0; partIndex < parts->size(); ++partIndex) {
+        const JObject *context = InitialContext(parts->get<JObject>(partIndex));
+        const JObject *time = context ? ObjectAt(*context, "time", "/score/parts/contexts", false) : nullptr;
+        const std::string timeJson = time ? JsonValue(jsonxx::Value(*time)) : std::string();
+        if (!activeMeterSet) {
+            activeMeter = timeJson;
+            activeMeterSet = true;
+        }
+        else if (activeMeter != timeJson) {
+            return Fail("JSM_CONFLICTING_METERS", "/score/parts/contexts/time",
+                "all parts must use the same initial meter");
+        }
+    }
     for (unsigned int barIndex = 0; barIndex < bars->size(); ++barIndex) {
         const std::string barPath = "/score/logicalBars/" + std::to_string(barIndex);
         if (!bars->has<JObject>(barIndex)) return Fail("JSM_INVALID_BAR", barPath, "expected object");
@@ -1433,6 +1568,126 @@ bool JsmInput::Import(const std::string &data)
         if (newPage) section->AddChild(new Pb());
         if (newSystem) section->AddChild(new Sb());
         if (newPage || newSystem) m_layoutInformation = LAYOUT_ENCODED;
+
+        struct ChangedStaff {
+            StaffBinding *binding;
+            const JObject *oldContext;
+            const JObject *newContext;
+            std::string staffId;
+        };
+        std::vector<ChangedStaff> changedStaves;
+        const JObject *effectiveMeter = nullptr;
+        std::string effectiveMeterJson;
+        bool effectiveMeterSet = false;
+        for (unsigned int partIndex = 0; partIndex < parts->size(); ++partIndex) {
+            const JObject &part = parts->get<JObject>(partIndex);
+            const JArray *partMeasures = ArrayAt(part, "measures", "/score/parts");
+            if (!partMeasures || !partMeasures->has<JObject>(barIndex)) continue;
+            const JObject &partMeasure = partMeasures->get<JObject>(barIndex);
+            if (!partMeasure.has<jsonxx::String>("contextRef")) continue;
+            const std::string contextRef = partMeasure.get<jsonxx::String>("contextRef");
+            const JObject *context = ContextById(part, contextRef);
+            if (!context) return Fail("JSM_UNKNOWN_CONTEXT", "/score/parts/measures/contextRef", contextRef);
+
+            const JObject *time = ObjectAt(*context, "time", "/score/parts/contexts", false);
+            const std::string timeJson = time ? JsonValue(jsonxx::Value(*time)) : std::string();
+            if (!effectiveMeterSet) {
+                effectiveMeter = time;
+                effectiveMeterJson = timeJson;
+                effectiveMeterSet = true;
+            }
+            else if (effectiveMeterJson != timeJson) {
+                return Fail("JSM_CONFLICTING_METERS", "/score/parts/measures/contextRef",
+                    "all parts must use the same meter at a measure boundary");
+            }
+
+            const JArray *measureStaves = ArrayAt(partMeasure, "staves", "/score/parts/measures", false);
+            if (measureStaves) {
+                for (unsigned int i = 0; i < measureStaves->size(); ++i) {
+                    if (!measureStaves->has<JObject>(i)) continue;
+                    const JObject &measureStaff = measureStaves->get<JObject>(i);
+                    if (!measureStaff.has<jsonxx::String>("staffId")) continue;
+                    const std::string staffId = measureStaff.get<jsonxx::String>("staffId");
+                    auto binding = staffBindings.find(staffId);
+                    if (binding == staffBindings.end()) {
+                        return Fail("JSM_UNKNOWN_STAFF", "/score/parts/measures/staves/staffId", staffId);
+                    }
+                    if (binding->second.partId != part.get<jsonxx::String>("id")) {
+                        return Fail("JSM_STAFF_OWNERSHIP", "/score/parts/measures/staves/staffId",
+                            "staff belongs to another part");
+                    }
+                    if (binding->second.contextId != contextRef) {
+                        changedStaves.push_back(
+                            { &binding->second, ContextById(part, binding->second.contextId), context, staffId });
+                    }
+                }
+            }
+        }
+
+        const bool meterChanged = !activeMeterSet || activeMeter != effectiveMeterJson;
+        if (!changedStaves.empty() || meterChanged) {
+            ScoreDef *contextChange = new ScoreDef();
+            contextChange->SetPpq(ppq);
+            if (meterChanged && effectiveMeter && !AddMeter(
+                    contextChange, *effectiveMeter, "/score/parts/contexts/time")) {
+                delete contextChange;
+                return false;
+            }
+
+            StaffGrp *changedStaffGrp = nullptr;
+            for (const ChangedStaff &change : changedStaves) {
+                const JObject *oldKey
+                    = change.oldContext ? ObjectAt(*change.oldContext, "key", "/score/parts/contexts", false) : nullptr;
+                const JObject *newKey = ObjectAt(*change.newContext, "key", "/score/parts/contexts", false);
+                const auto clefForStaff = [&change](const JObject *context) -> const JObject * {
+                    if (!context) return nullptr;
+                    const JArray *staves = ArrayAt(*context, "staves", "/score/parts/contexts", false);
+                    if (!staves) return nullptr;
+                    for (unsigned int i = 0; i < staves->size(); ++i) {
+                        if (!staves->has<JObject>(i)) continue;
+                        const JObject &staff = staves->get<JObject>(i);
+                        if (staff.get<jsonxx::String>("staffId", "") == change.staffId) {
+                            return ObjectAt(staff, "clef", "/score/parts/contexts/staves", false);
+                        }
+                    }
+                    return nullptr;
+                };
+                const JObject *oldClef = clefForStaff(change.oldContext);
+                const JObject *newClef = clefForStaff(change.newContext);
+                const bool keyChanged = (oldKey ? JsonValue(jsonxx::Value(*oldKey)) : std::string())
+                    != (newKey ? JsonValue(jsonxx::Value(*newKey)) : std::string());
+                const bool clefChanged = (oldClef ? JsonValue(jsonxx::Value(*oldClef)) : std::string())
+                    != (newClef ? JsonValue(jsonxx::Value(*newClef)) : std::string());
+                if (keyChanged || clefChanged) {
+                    if (!changedStaffGrp) {
+                        changedStaffGrp = new StaffGrp();
+                        contextChange->AddChild(changedStaffGrp);
+                    }
+                    StaffDef *staffDef = new StaffDef();
+                    staffDef->SetN(change.binding->number);
+                    if (clefChanged && newClef
+                        && !AddClef(staffDef, *newClef, "/score/parts/contexts/staves/clef", true)) {
+                        delete contextChange;
+                        return false;
+                    }
+                    if (keyChanged && newKey && !AddKeySig(staffDef, *newKey, "/score/parts/contexts/key")) {
+                        delete contextChange;
+                        return false;
+                    }
+                    changedStaffGrp->AddChild(staffDef);
+                }
+            }
+            if (meterChanged || changedStaffGrp) section->AddChild(contextChange);
+            else delete contextChange;
+        }
+        activeMeter = effectiveMeterJson;
+        activeMeterSet = true;
+        for (const ChangedStaff &change : changedStaves) {
+            const JObject *key = ObjectAt(*change.newContext, "key", "/score/parts/contexts", false);
+            change.binding->contextId = change.newContext->get<jsonxx::String>("id");
+            change.binding->fifths = key ? IntAt(*key, "fifths", 0) : 0;
+        }
+
         Measure *measure = new Measure(MEASURED, static_cast<int>(barIndex + 1));
         std::string primaryMeasureId = barId;
         if (parts->has<JObject>(0)) {
@@ -1464,23 +1719,6 @@ bool JsmInput::Import(const std::string &data)
                 return false;
             if (!partMeasure.has<jsonxx::String>("barId") || partMeasure.get<jsonxx::String>("barId") != barId) {
                 return Fail("JSM_MEASURE_ALIGNMENT", "/score/parts/measures/barId", "barId does not match logical bar");
-            }
-            if (partMeasure.has<jsonxx::String>("contextRef")) {
-                const std::string contextRef = partMeasure.get<jsonxx::String>("contextRef");
-                const JArray *declaredStaves = ArrayAt(partMeasure, "staves", "/score/parts/measures", false);
-                if (declaredStaves) {
-                    for (unsigned int i = 0; i < declaredStaves->size(); ++i) {
-                        if (!declaredStaves->has<JObject>(i)) continue;
-                        const JObject &declaredStaff = declaredStaves->get<JObject>(i);
-                        if (!declaredStaff.has<jsonxx::String>("staffId")) continue;
-                        auto declaredBinding = staffBindings.find(declaredStaff.get<jsonxx::String>("staffId"));
-                        if (declaredBinding != staffBindings.end() && !declaredBinding->second.contextId.empty()
-                            && contextRef != declaredBinding->second.contextId) {
-                            return Fail("JSM_UNSUPPORTED_CONTEXT_CHANGE", "/score/parts/measures/contextRef",
-                                "measure-boundary context changes are not yet supported");
-                        }
-                    }
-                }
             }
             const JObject *navigation = ObjectAt(partMeasure, "navigation", "/score/parts/measures", false);
             if (navigation) {

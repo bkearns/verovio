@@ -32,6 +32,34 @@ fi
 
 echo "JSM native smoke passed: stable IDs present; written accidentals=$written_accidentals"
 
+jq '.score.parts[0] as $source
+    | [$source | .. | objects | .id? // empty] as $ids
+    | (reduce $ids[] as $id ($source;
+        walk(if type == "string" and . == $id then "second-" + . else . end))) as $second
+    | ($second.contexts[0]
+        | .id = "second-context-c-major"
+        | .contentHash = ("b" * 64)
+        | .key = {fifths: 0, mode: "major"}) as $changed
+    | ($second
+        | .name = "Second Clarinet"
+        | .abbreviation = "2nd Cl."
+        | .contexts += [$changed]
+        | .measures[1].contextRef = $changed.id) as $second
+    | .score.parts += [$second]
+    | .score.views[0].partIds += [$second.id]' "$fixture" >"$tmp/multipart-context.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/multipart-context.mei" "$tmp/multipart-context.jsm"
+rg -U -q '<scoreDef[^>]*>[[:space:]]*<staffGrp[^>]*>[[:space:]]*<staffDef[^>]*n="2"[^>]*>[[:space:]]*<keySig[^>]*sig="0"' \
+    "$tmp/multipart-context.mei"
+
+jq '(.score.parts[1].contexts[] | select(.id == "second-context-c-major") | .time) =
+    {beats: [3], beatType: 8}' "$tmp/multipart-context.jsm" >"$tmp/conflicting-meter.jsm"
+if "$verovio" -r "$repo/data" -f jsm -o "$tmp/conflicting-meter.svg" "$tmp/conflicting-meter.jsm" \
+    >"$tmp/conflicting-meter.log" 2>&1; then
+    echo "conflicting part-local meters were accepted" >&2
+    exit 1
+fi
+rg -q 'JSM_CONFLICTING_METERS' "$tmp/conflicting-meter.log"
+
 jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].id = "unsafe id"' "$fixture" >"$tmp/unsafe.jsm"
 if "$verovio" -r "$repo/data" -f jsm -o "$tmp/unsafe.svg" "$tmp/unsafe.jsm" >"$tmp/unsafe.log" 2>&1; then
     echo "unsafe ID was accepted" >&2
