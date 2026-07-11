@@ -30,6 +30,11 @@ if [[ $written_accidentals -ne 3 ]]; then
     exit 1
 fi
 
+jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].articulations = ["strong-accent"]' \
+    "$fixture" >"$tmp/strong-accent.jsm"
+"$verovio" -r "$repo/data" -f jsm -o "$tmp/strong-accent.svg" "$tmp/strong-accent.jsm"
+rg -U -q 'class="artic"[^>]*>[[:space:]]*<use[^>]*xlink:href="#E4AC-' "$tmp/strong-accent.svg"
+
 echo "JSM native smoke passed: stable IDs present; written accidentals=$written_accidentals"
 
 jq '.score.conductorTrack.measures[0].events = [{
