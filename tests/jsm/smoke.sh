@@ -153,4 +153,56 @@ rg -q '<note[^>]*loc="' "$tmp/event-percussion.mei"
 rg -q '<note[^>]*stem.dir="up"' "$tmp/event-percussion.mei"
 rg -q '<note[^>]*stem.dir="down"' "$tmp/event-percussion.mei"
 
+jq '.score.parts[0] as $part
+    | ($part.contexts[0]
+        | .id = "mid-measure-clef-context"
+        | .contentHash = ("d" * 64)
+        | .staves[0].clef = {sign:"F", line:4}) as $changed
+    | .score.parts[0].contexts += [$changed]
+    | .score.parts[0].measures[0].measureEvents += [{
+        type:"contextChange", id:"mid-measure-clef-change", onset:[2,1], duration:[0,1], order:0,
+        contextRef:$changed.id, staffIds:[$part.staves[0].id]
+    }]' "$fixture" >"$tmp/mid-measure-context.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/mid-measure-context.mei" "$tmp/mid-measure-context.jsm"
+python3 - "$tmp/mid-measure-context.mei" <<'PY'
+import pathlib
+import sys
+
+mei = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+positions = [
+    mei.index('xml:id="event-b-flat-1"'),
+    mei.index('xml:id="event-e-flat-1"'),
+    mei.index('shape="F" line="4"'),
+    mei.index('xml:id="event-b-natural-1"'),
+]
+if positions != sorted(positions):
+    raise SystemExit("mid-measure clef was not materialized at its exact layer boundary")
+PY
+
+declare -A invalid_context_changes=(
+    [unknown]='.score.parts[0].measures[0].measureEvents[-1].contextRef = "missing-context"'
+    [ownership]='.score.parts[0].measures[0].measureEvents[-1].staffIds = ["other-staff"]'
+    [onset]='.score.parts[0].measures[0].measureEvents[-1].onset = [3,2]'
+    [duration]='.score.parts[0].measures[0].measureEvents[-1].duration = [1,1]'
+    [incomplete]='del(.score.parts[0].contexts[-1].key)'
+    [type]='.score.parts[0].measures[0].measureEvents[-1].type = "futureContext"'
+)
+declare -A invalid_context_codes=(
+    [unknown]=JSM_UNKNOWN_CONTEXT
+    [ownership]=JSM_CONTEXT_STAFF_OWNERSHIP
+    [onset]=JSM_UNALIGNED_CONTEXT_ONSET
+    [duration]=JSM_INVALID_CONTEXT_DURATION
+    [incomplete]=JSM_INCOMPLETE_CONTEXT
+    [type]=JSM_UNSUPPORTED_MEASURE_EVENT
+)
+for invalid in "${!invalid_context_changes[@]}"; do
+    jq "${invalid_context_changes[$invalid]}" "$tmp/mid-measure-context.jsm" >"$tmp/invalid-context-$invalid.jsm"
+    if "$verovio" -r "$repo/data" -f jsm -o "$tmp/invalid-context-$invalid.svg" \
+        "$tmp/invalid-context-$invalid.jsm" >"$tmp/invalid-context-$invalid.log" 2>&1; then
+        echo "invalid context change was accepted: $invalid" >&2
+        exit 1
+    fi
+    rg -q "${invalid_context_codes[$invalid]}" "$tmp/invalid-context-$invalid.log"
+done
+
 echo "JSM smoke passed: compact validation, contexts, credits, and native event engraving"

@@ -455,6 +455,36 @@ struct PendingSpanner {
     int beatType = 4;
 };
 
+struct PendingContextChange {
+    const JObject *source = nullptr;
+    const JObject *context = nullptr;
+    std::string path;
+    long double onset = 0.0L;
+    std::set<std::string> staffIds;
+};
+
+std::string JsonValue(const jsonxx::Value &value);
+
+const JObject *ContextClefForStaff(const JObject &context, const std::string &staffId)
+{
+    const JArray *staves = ArrayAt(context, "staves", "/score/parts/contexts", false);
+    if (!staves) return nullptr;
+    for (unsigned int i = 0; i < staves->size(); ++i) {
+        if (!staves->has<JObject>(i)) continue;
+        const JObject &staff = staves->get<JObject>(i);
+        if (staff.get<jsonxx::String>("staffId", "") == staffId) {
+            return ObjectAt(staff, "clef", "/score/parts/contexts/staves", false);
+        }
+    }
+    return nullptr;
+}
+
+bool SameObject(const JObject *left, const JObject *right)
+{
+    return (left ? JsonValue(jsonxx::Value(*left)) : std::string())
+        == (right ? JsonValue(jsonxx::Value(*right)) : std::string());
+}
+
 bool ValidateIds(const jsonxx::Value &value, const std::string &path, std::set<std::string> &ids)
 {
     static const std::regex safeId("^[A-Za-z_][A-Za-z0-9_.:-]*$");
@@ -1894,6 +1924,88 @@ bool JsmInput::Import(const std::string &data)
                 return Fail("JSM_STAFF_COVERAGE", "/score/parts/measures/staves",
                     "each measure must contain every declared part staff exactly once");
             }
+
+            std::vector<PendingContextChange> contextChanges;
+            const JArray *measureEvents = ArrayAt(partMeasure, "measureEvents", "/score/parts/measures", false);
+            if (measureEvents) {
+                for (unsigned int eventIndex = 0; eventIndex < measureEvents->size(); ++eventIndex) {
+                    const std::string eventPath = "/score/parts/" + std::to_string(partIndex) + "/measures/"
+                        + std::to_string(barIndex) + "/measureEvents/" + std::to_string(eventIndex);
+                    if (!measureEvents->has<JObject>(eventIndex)) {
+                        return Fail("JSM_INVALID_MEASURE_EVENT", eventPath, "expected object");
+                    }
+                    const JObject &event = measureEvents->get<JObject>(eventIndex);
+                    if (event.get<jsonxx::String>("type", "") != "contextChange") continue;
+                    long double onset = 0.0L;
+                    long double duration = 0.0L;
+                    if (!RationalAt(event, "onset", eventPath, onset)
+                        || !RationalAt(event, "duration", eventPath, duration))
+                        return false;
+                    long double measureDuration = 0.0L;
+                    if (!RationalAt(partMeasure, "duration", "/score/parts/measures", measureDuration)) return false;
+                    if (onset < 0.0L || onset > measureDuration) {
+                        return Fail("JSM_INVALID_CONTEXT_ONSET", eventPath + "/onset", "outside measure duration");
+                    }
+                    if (std::abs(duration) > 1e-12L) {
+                        return Fail("JSM_INVALID_CONTEXT_DURATION", eventPath + "/duration", "expected zero");
+                    }
+                    std::string contextRef;
+                    if (!StringAt(event, "contextRef", eventPath, contextRef)) return false;
+                    const JObject *context = ContextById(part, contextRef);
+                    if (!context) return Fail("JSM_UNKNOWN_CONTEXT", eventPath + "/contextRef", contextRef);
+                    const JArray *contextStaves = ArrayAt(*context, "staves", "/score/parts/contexts", false);
+                    if (!ObjectAt(*context, "key", "/score/parts/contexts", false)
+                        || !ObjectAt(*context, "time", "/score/parts/contexts", false) || !contextStaves) {
+                        return Fail("JSM_INCOMPLETE_CONTEXT", eventPath + "/contextRef",
+                            "context changes require complete key, time, and staff snapshots");
+                    }
+                    std::set<std::string> snapshotStaffIds;
+                    for (unsigned int i = 0; i < contextStaves->size(); ++i) {
+                        if (!contextStaves->has<JObject>(i)
+                            || !contextStaves->get<JObject>(i).has<jsonxx::String>("staffId")) {
+                            return Fail("JSM_INCOMPLETE_CONTEXT", eventPath + "/contextRef/staves",
+                                "expected staff snapshots with staffId");
+                        }
+                        snapshotStaffIds.insert(contextStaves->get<JObject>(i).get<jsonxx::String>("staffId"));
+                    }
+                    if (snapshotStaffIds.size() != partStaves->size()) {
+                        return Fail("JSM_INCOMPLETE_CONTEXT", eventPath + "/contextRef/staves",
+                            "snapshot must cover every part staff");
+                    }
+                    for (unsigned int i = 0; i < partStaves->size(); ++i) {
+                        if (!partStaves->has<JObject>(i)
+                            || !snapshotStaffIds.contains(partStaves->get<JObject>(i).get<jsonxx::String>("id", ""))) {
+                            return Fail("JSM_INCOMPLETE_CONTEXT", eventPath + "/contextRef/staves",
+                                "snapshot must cover every part staff");
+                        }
+                    }
+                    PendingContextChange pending { &event, context, eventPath, onset, {} };
+                    const JArray *staffIds = ArrayAt(event, "staffIds", eventPath, false);
+                    if (staffIds) {
+                        if (staffIds->empty()) {
+                            return Fail("JSM_INVALID_CONTEXT_STAVES", eventPath + "/staffIds", "expected non-empty array");
+                        }
+                        for (unsigned int i = 0; i < staffIds->size(); ++i) {
+                            if (!staffIds->has<jsonxx::String>(i)) {
+                                return Fail("JSM_INVALID_CONTEXT_STAVES", eventPath + "/staffIds", "expected IDs");
+                            }
+                            const std::string staffId = staffIds->get<jsonxx::String>(i);
+                            const auto binding = staffBindings.find(staffId);
+                            if (binding == staffBindings.end() || binding->second.partId != partId) {
+                                return Fail("JSM_CONTEXT_STAFF_OWNERSHIP", eventPath + "/staffIds", staffId);
+                            }
+                            if (!pending.staffIds.insert(staffId).second) {
+                                return Fail("JSM_DUPLICATE_CONTEXT_STAFF", eventPath + "/staffIds", staffId);
+                            }
+                        }
+                    }
+                    contextChanges.push_back(std::move(pending));
+                }
+                std::stable_sort(contextChanges.begin(), contextChanges.end(), [](const auto &left, const auto &right) {
+                    if (left.onset != right.onset) return left.onset < right.onset;
+                    return IntAt(*left.source, "order", 0) < IntAt(*right.source, "order", 0);
+                });
+            }
             std::set<std::string> seenMeasureStaves;
             for (unsigned int staffIndex = 0; staffIndex < measureStaves->size(); ++staffIndex) {
                 if (!measureStaves->has<JObject>(staffIndex)) {
@@ -1920,6 +2032,17 @@ bool JsmInput::Import(const std::string &data)
                 staff->m_unsupported.push_back({ "jsm-measure-id", partMeasureId });
                 measure->AddChild(staff);
                 std::map<std::string, int> accidentalState;
+                const std::string baseContextRef = partMeasure.get<jsonxx::String>("contextRef", "");
+                const JObject *baseContext = ContextById(part, baseContextRef);
+                if (!baseContext) {
+                    return Fail("JSM_UNKNOWN_CONTEXT", "/score/parts/measures/contextRef", baseContextRef);
+                }
+                std::vector<const PendingContextChange *> staffContextChanges;
+                for (const PendingContextChange &change : contextChanges) {
+                    if (change.staffIds.empty() || change.staffIds.contains(staffId)) {
+                        staffContextChanges.push_back(&change);
+                    }
+                }
                 const JArray *voices = ArrayAt(measureStaff, "voices", "/score/parts/measures/staves");
                 if (!voices) return false;
                 if (voices->size() > 1) {
@@ -1935,6 +2058,49 @@ bool JsmInput::Import(const std::string &data)
                     layer->SetN(static_cast<int>(voiceIndex + 1));
                     if (voice.has<jsonxx::String>("id")) layer->SetID(voice.get<jsonxx::String>("id"));
                     staff->AddChild(layer);
+                    const JObject *activeContext = baseContext;
+                    const JObject *initialKey = ObjectAt(*activeContext, "key", "/score/parts/contexts", false);
+                    int activeFifths = initialKey ? IntAt(*initialKey, "fifths", 0) : 0;
+                    size_t nextContextChange = 0;
+                    auto applyContextChanges = [&](long double onset) -> bool {
+                        while (nextContextChange < staffContextChanges.size()) {
+                            const PendingContextChange &change = *staffContextChanges[nextContextChange];
+                            if (change.onset > onset + 1e-12L) break;
+                            if (change.onset < onset - 1e-12L) {
+                                return Fail("JSM_UNALIGNED_CONTEXT_ONSET", change.path + "/onset",
+                                    "context onset must align with a layer event boundary");
+                            }
+                            const JObject *oldKey = ObjectAt(*activeContext, "key", "/score/parts/contexts", false);
+                            const JObject *newKey = ObjectAt(*change.context, "key", "/score/parts/contexts", false);
+                            const JObject *oldTime = ObjectAt(*activeContext, "time", "/score/parts/contexts", false);
+                            const JObject *newTime = ObjectAt(*change.context, "time", "/score/parts/contexts", false);
+                            const JObject *oldClef = ContextClefForStaff(*activeContext, staffId);
+                            const JObject *newClef = ContextClefForStaff(*change.context, staffId);
+                            if (!newClef) {
+                                return Fail("JSM_INCOMPLETE_CONTEXT", change.path + "/contextRef",
+                                    "context snapshot does not cover the affected staff");
+                            }
+                            if (!change.staffIds.empty()
+                                && (!SameObject(oldKey, newKey) || !SameObject(oldTime, newTime))) {
+                                return Fail("JSM_SCOPED_CONTEXT_CONFLICT", change.path + "/staffIds",
+                                    "staff-scoped changes may only alter staff notation");
+                            }
+                            if (!SameObject(oldClef, newClef)
+                                && !AddClef(layer, *newClef, change.path + "/contextRef/staves", true))
+                                return false;
+                            if (change.staffIds.empty() && !SameObject(oldKey, newKey)) {
+                                if (!AddKeySig(layer, *newKey, change.path + "/contextRef/key")) return false;
+                                activeFifths = IntAt(*newKey, "fifths", 0);
+                                accidentalState.clear();
+                            }
+                            if (change.staffIds.empty() && !SameObject(oldTime, newTime)
+                                && !AddMeter(layer, *newTime, change.path + "/contextRef/time"))
+                                return false;
+                            activeContext = change.context;
+                            ++nextContextChange;
+                        }
+                        return true;
+                    };
                     const JArray *events = ArrayAt(voice, "events", "/score/parts/measures/staves/voices");
                     if (!events) return false;
                     long double expectedOnset = 0.0L;
@@ -1958,6 +2124,7 @@ bool JsmInput::Import(const std::string &data)
                             return Fail("JSM_ONSET_GAP", eventPath + "/onset",
                                 "events must be contiguous; encode gaps with spacer events");
                         }
+                        if (!applyContextChanges(onset)) return false;
                         expectedOnset += eventDuration;
                         std::string type;
                         std::string eventId;
@@ -2008,7 +2175,7 @@ bool JsmInput::Import(const std::string &data)
                             note->m_unsupported.push_back({ "jsm-tone-id", toneId });
                             if (!SetDuration(note, event, eventPath, activeTuplet != nullptr)
                                 || !AddTone(
-                                    note, *tone, accidentalState, binding->second.fifths, eventPath + "/tone")
+                                    note, *tone, accidentalState, activeFifths, eventPath + "/tone")
                                 || !SetEventAppearance(note, event, eventPath)) {
                                 delete note;
                                 return false;
@@ -2048,7 +2215,7 @@ bool JsmInput::Import(const std::string &data)
                                 Note *note = new Note();
                                 note->SetID(toneId);
                                 note->m_unsupported.push_back({ "jsm-tone-id", toneId });
-                                if (!AddTone(note, tone, accidentalState, binding->second.fifths,
+                                if (!AddTone(note, tone, accidentalState, activeFifths,
                                         eventPath + "/tones/" + std::to_string(toneIndex))) {
                                     delete note;
                                     delete chord;
@@ -2134,6 +2301,11 @@ bool JsmInput::Import(const std::string &data)
                     }
                     if (activeBeam) return Fail("JSM_INVALID_BEAM", "/score/parts/measures", "unterminated beam");
                     if (activeTuplet) return Fail("JSM_INVALID_TUPLET", "/score/parts/measures", "unterminated tuplet");
+                    if (!applyContextChanges(expectedOnset)) return false;
+                    if (nextContextChange != staffContextChanges.size()) {
+                        return Fail("JSM_UNALIGNED_CONTEXT_ONSET", staffContextChanges[nextContextChange]->path + "/onset",
+                            "context onset must align with a layer event boundary");
+                    }
                     long double measureDuration = 0.0L;
                     if (!RationalAt(partMeasure, "duration", "/score/parts/measures", measureDuration)) return false;
                     if (std::abs(expectedOnset - measureDuration) > 1e-12L) {
@@ -2162,7 +2334,6 @@ bool JsmInput::Import(const std::string &data)
                         partId, defaultStaff->second.number, InitialBeatType(part) });
                 }
             }
-            const JArray *measureEvents = ArrayAt(partMeasure, "measureEvents", "/score/parts/measures", false);
             if (measureEvents) {
                 for (unsigned int eventIndex = 0; eventIndex < measureEvents->size(); ++eventIndex) {
                     const std::string directionPath = "/score/parts/" + std::to_string(partIndex) + "/measures/"
@@ -2174,6 +2345,7 @@ bool JsmInput::Import(const std::string &data)
                     std::string type;
                     std::string conductorId;
                     if (!StringAt(direction, "type", directionPath, type)) return false;
+                    if (type == "contextChange") continue;
                     if (type != "directionRef") {
                         return Fail("JSM_UNSUPPORTED_MEASURE_EVENT", directionPath + "/type", type);
                     }
