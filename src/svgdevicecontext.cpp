@@ -1259,14 +1259,24 @@ void SvgDeviceContext::AppendIdAndClass(
 
 void SvgDeviceContext::AppendAdditionalAttributes(Object *object)
 {
+    ArrayOfStrAttr objectAttributes;
+    object->GetAttributes(&objectAttributes);
+    for (const auto &attribute : objectAttributes) {
+        if (attribute.first.rfind("jsm-", 0) == 0) {
+            m_currentNode.append_attribute(("data-" + attribute.first).c_str()) = attribute.second.c_str();
+        }
+    }
+
     std::pair<std::multimap<ClassId, std::string>::iterator, std::multimap<ClassId, std::string>::iterator> range;
     range = m_svgAdditionalAttributes.equal_range(object->GetClassId()); // if correct class name...
     for (std::multimap<ClassId, std::string>::iterator it = range.first; it != range.second; ++it) {
-        ArrayOfStrAttr attributes;
-        object->GetAttributes(&attributes);
-        for (ArrayOfStrAttr::iterator iter = attributes.begin(); iter != attributes.end(); ++iter) {
-            if (it->second == (*iter).first) // ...and attribute exists in class name, add it to SVG element
-                m_currentNode.append_attribute(("data-" + it->second).c_str()) = (*iter).second.c_str();
+        for (ArrayOfStrAttr::iterator iter = objectAttributes.begin(); iter != objectAttributes.end(); ++iter) {
+            if (it->second == (*iter).first) { // ...and attribute exists in class name, add it to SVG element
+                const std::string name = "data-" + it->second;
+                if (!m_currentNode.attribute(name.c_str())) {
+                    m_currentNode.append_attribute(name.c_str()) = (*iter).second.c_str();
+                }
+            }
         }
     }
 }
