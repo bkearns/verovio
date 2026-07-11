@@ -188,6 +188,30 @@ jq '.score.conductorTrack.measures[0].events[0].value = "D.S. al Coda"' \
 rg -q '<dir[^>]*type="dalsegno"' "$tmp/direction-ds-al-coda.mei"
 rg -q '<rend[^>]*halign="right"[^>]*>D.S. al Coda</rend>' "$tmp/direction-ds-al-coda.mei"
 
+jq '.score.parts[0].measures[0].navigation = {markers:["segno"], jump:"ds"}' \
+    "$fixture" >"$tmp/measure-navigation-ds.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/measure-navigation-ds.mei" \
+    "$tmp/measure-navigation-ds.jsm"
+python3 - "$tmp/measure-navigation-ds.mei" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+repeat_marks = [element for element in root.iter() if element.tag.rsplit("}", 1)[-1] == "repeatMark"]
+directions = [element for element in root.iter() if element.tag.rsplit("}", 1)[-1] == "dir"]
+if len(repeat_marks) != 1 or repeat_marks[0].attrib.get("func") != "segno":
+    raise SystemExit("expected one measure-level repeatMark func=segno")
+if repeat_marks[0].attrib.get("staff") != "1" or repeat_marks[0].attrib.get("tstamp") != "5":
+    raise SystemExit("expected segno on staff 1 at measure-end timestamp 5")
+if len(directions) != 1 or directions[0].attrib.get("type") != "dalsegno":
+    raise SystemExit("expected one measure-level Dir type=dalsegno")
+if directions[0].attrib.get("staff") != "1" or directions[0].attrib.get("tstamp") != "5":
+    raise SystemExit("expected D.S. on staff 1 at measure-end timestamp 5")
+rends = [element for element in directions[0] if element.tag.rsplit("}", 1)[-1] == "rend"]
+if len(rends) != 1 or rends[0].attrib.get("halign") != "right" or "".join(rends[0].itertext()) != "D.S.":
+    raise SystemExit("expected right-aligned D.S. direction text")
+PY
+
 jq '.score.conductorTrack.measures[0].events = [{
         id:"rehearsal-a", onset:[0,1], duration:[0,1], order:0, kind:"rehearsal", value:"A",
         rehearsal:{enclosure:"circle"}

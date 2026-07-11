@@ -56,6 +56,7 @@
 #include "pghead.h"
 #include "reh.h"
 #include "rend.h"
+#include "repeatmark.h"
 #include "rest.h"
 #include "sb.h"
 #include "score.h"
@@ -801,6 +802,88 @@ namespace {
         return time ? IntAt(*time, "beatType", 4) : 4;
     }
 
+    std::string NavigationType(const std::string &value)
+    {
+        if (value.starts_with("D.C.")) return "dacapo";
+        if (value.starts_with("D.S.")) return "dalsegno";
+        if (value == "Fine") return "fine";
+        if (value == "To Coda") return "tocoda";
+        return {};
+    }
+
+    bool IsNavigationText(const JObject &event)
+    {
+        if (event.get<jsonxx::String>("kind", "") != "direction" || !event.has<jsonxx::String>("value")) return false;
+        return !NavigationType(event.get<jsonxx::String>("value")).empty();
+    }
+
+    bool AddMeasureNavigation(const JObject &navigation, const JObject &partMeasure, const JArray &partStaves,
+        const std::map<std::string, StaffBinding> &staffBindings, int beatType, bool addJump, Measure *measure)
+    {
+        std::string staffId;
+        if (!partStaves.has<JObject>(0)
+            || !StringAt(partStaves.get<JObject>(0), "id", "/score/parts/staves/0", staffId))
+            return false;
+        const auto binding = staffBindings.find(staffId);
+        if (binding == staffBindings.end()) {
+            return Fail("JSM_UNKNOWN_STAFF", "/score/parts/staves/0/id", staffId);
+        }
+        long double duration = 0.0L;
+        if (!RationalAt(partMeasure, "duration", "/score/parts/measures", duration)) return false;
+        const double timestamp = 1.0 + static_cast<double>(duration) * beatType / 4.0;
+        const std::vector<int> staffNumbers{ binding->second.number };
+
+        const JArray *markers = ArrayAt(navigation, "markers", "/score/parts/measures/navigation", false);
+        std::set<std::string> renderedMarkers;
+        if (markers) {
+            for (unsigned int i = 0; i < markers->size(); ++i) {
+                if (!markers->has<jsonxx::String>(i)) {
+                    return Fail(
+                        "JSM_INVALID_NAVIGATION", "/score/parts/measures/navigation/markers", "expected strings");
+                }
+                const std::string marker = markers->get<jsonxx::String>(i);
+                repeatMarkLog_FUNC function = repeatMarkLog_FUNC_NONE;
+                if (marker == "segno")
+                    function = repeatMarkLog_FUNC_segno;
+                else if (marker == "coda")
+                    function = repeatMarkLog_FUNC_coda;
+                else
+                    continue;
+                if (!renderedMarkers.insert(marker).second) continue;
+                RepeatMark *repeatMark = new RepeatMark();
+                repeatMark->SetStaff(staffNumbers);
+                repeatMark->SetTstamp(timestamp);
+                repeatMark->SetFunc(function);
+                measure->AddChild(repeatMark);
+            }
+        }
+
+        if (!addJump || !navigation.has<jsonxx::String>("jump")) return true;
+        static const std::map<std::string, std::pair<std::string, std::string>> jumps = {
+            { "dc", { "dacapo", "D.C." } },
+            { "ds", { "dalsegno", "D.S." } },
+            { "dc-al-fine", { "dacapo", "D.C. al Fine" } },
+            { "ds-al-coda", { "dalsegno", "D.S. al Coda" } },
+            { "fine", { "fine", "Fine" } },
+            { "to-coda", { "tocoda", "To Coda" } },
+        };
+        const std::string jump = navigation.get<jsonxx::String>("jump");
+        const auto value = jumps.find(jump);
+        if (value == jumps.end()) return true;
+        Dir *direction = new Dir();
+        direction->SetType(value->second.first);
+        direction->SetStaff(staffNumbers);
+        direction->SetTstamp(timestamp);
+        Rend *rend = new Rend();
+        rend->SetHalign(HORIZONTALALIGNMENT_right);
+        Text *text = new Text();
+        text->SetText(UTF8to32(value->second.second));
+        rend->AddChild(text);
+        direction->AddChild(rend);
+        measure->AddChild(direction);
+        return true;
+    }
+
     bool AddDirectionRef(const JObject &reference, const JObject &conductor, const std::string &path,
         const std::string &defaultStaffId, const std::map<std::string, StaffBinding> &staffBindings, int beatType,
         std::set<std::string> &renderedOnce, Measure *measure)
@@ -927,15 +1010,7 @@ namespace {
                 direction->SetPlace(Placement(reference));
                 direction->SetStaff(staffNumbers);
                 Object *textParent = direction;
-                std::string navigationType;
-                if (value.starts_with("D.C."))
-                    navigationType = "dacapo";
-                else if (value.starts_with("D.S."))
-                    navigationType = "dalsegno";
-                else if (value == "Fine")
-                    navigationType = "fine";
-                else if (value == "To Coda")
-                    navigationType = "tocoda";
+                const std::string navigationType = NavigationType(value);
                 if (!navigationType.empty()) {
                     direction->SetType(navigationType);
                     Rend *rend = new Rend();
@@ -2081,6 +2156,7 @@ bool JsmInput::Import(const std::string &data)
                 return Fail("JSM_MEASURE_ALIGNMENT", "/score/parts/measures/barId", "barId does not match logical bar");
             }
             const JObject *navigation = ObjectAt(partMeasure, "navigation", "/score/parts/measures", false);
+            bool hasRenderedNavigationJump = false;
             if (navigation) {
                 repeatStart = repeatStart || BoolAt(*navigation, "repeatStart", false);
                 repeatEnd = repeatEnd || navigation->has<jsonxx::Number>("repeatEnd");
@@ -2532,8 +2608,14 @@ bool JsmInput::Import(const std::string &data)
                     if (!AddDirectionRef(direction, *conductor->second, directionPath, defaultStaffId, staffBindings,
                             InitialBeatType(part), renderedConductorEvents, measure))
                         return false;
+                    hasRenderedNavigationJump = hasRenderedNavigationJump || IsNavigationText(*conductor->second);
                 }
             }
+            if (navigation
+                && !AddMeasureNavigation(*navigation, partMeasure, *partStaves, staffBindings,
+                    effectiveMeter ? IntAt(*effectiveMeter, "beatType", 4) : InitialBeatType(part),
+                    !hasRenderedNavigationJump, measure))
+                return false;
         }
         if (repeatStart) measure->SetLeft(BARRENDITION_rptstart);
         if (repeatEnd) measure->SetRight(BARRENDITION_rptend);
