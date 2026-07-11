@@ -2844,7 +2844,21 @@ bool JsmInput::Import(const std::string &data)
                 delete octave;
                 return Fail("JSM_UNSUPPORTED_SPANNER", pending.path + "/properties/direction", direction);
             }
-            octave->SetN(std::to_string(IntAt(*pending.source, "number", 1)));
+            const int octaveDelta = (direction == "up" ? 1 : -1) * ((size - 1) / 7);
+            for (const auto &[sourceId, targetId] : eventTargets) {
+                const auto timing = eventTimes.find(sourceId);
+                if (timing == eventTimes.end()) continue;
+                const auto [barIndex, timestamp] = timing->second;
+                const bool beforeStart = barIndex < startEndpoint.barIndex
+                    || (barIndex == startEndpoint.barIndex && timestamp < startEndpoint.timestamp);
+                const bool afterEnd = barIndex > endEndpoint.barIndex
+                    || (barIndex == endEndpoint.barIndex && timestamp > endEndpoint.timestamp);
+                if (beforeStart || afterEnd) continue;
+                Note *note = dynamic_cast<Note *>(m_doc->FindDescendantByID(targetId));
+                if (!note || !note->HasOct()) continue;
+                note->SetOctGes(note->GetOct());
+                note->SetOct(note->GetOct() + octaveDelta);
+            }
             octave->SetStaff({ pending.staffNumber });
             spanner = octave;
         }

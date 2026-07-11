@@ -35,6 +35,20 @@ jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].tone.accidental = 
 "$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/courtesy-accidental.mei" "$tmp/courtesy-accidental.jsm"
 rg -q '<accid[^>]*accid="f"[^>]*enclose="paren"' "$tmp/courtesy-accidental.mei"
 
+jq '.score.parts[0].measures[0].spanners = [{
+        "id": "octave-shift-1", "kind": "octave-shift", "number": 1,
+        "properties": {"direction": "up", "size": 8},
+        "start": {"kind": "event", "partId": "part-1", "measureId": "part-measure-1", "eventId": "event-b-flat-1"},
+        "end": {"kind": "event", "partId": "part-1", "measureId": "part-measure-1", "eventId": "event-b-natural-2"}
+    }]' "$fixture" >"$tmp/octave-shift.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/octave-shift.mei" "$tmp/octave-shift.jsm"
+rg -q '<octave[^>]*dis="8"[^>]*dis.place="below"' "$tmp/octave-shift.mei"
+rg -q '<note[^>]*oct="6"[^>]*oct.ges="5"' "$tmp/octave-shift.mei"
+if rg -q '<octave[^>]* n=' "$tmp/octave-shift.mei"; then
+    echo "octave-shift association number must not become an engraved MEI n attribute" >&2
+    exit 1
+fi
+
 jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].articulations = ["strong-accent"]' \
     "$fixture" >"$tmp/strong-accent.jsm"
 "$verovio" -r "$repo/data" -f jsm -o "$tmp/strong-accent.svg" "$tmp/strong-accent.jsm"
