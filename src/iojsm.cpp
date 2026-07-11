@@ -234,6 +234,10 @@ namespace {
         if (name == "marcato") return ARTICULATION_marc;
         if (name == "staccatissimo") return ARTICULATION_stacciss;
         if (name == "spiccato") return ARTICULATION_spicc;
+        if (name == "scoop") return ARTICULATION_scoop;
+        if (name == "plop") return ARTICULATION_plop;
+        if (name == "doit") return ARTICULATION_doit;
+        if (name == "falloff") return ARTICULATION_fall;
         return ARTICULATION_NONE;
     }
 

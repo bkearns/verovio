@@ -45,6 +45,26 @@ jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].articulations = ["
 "$verovio" -r "$repo/data" -f jsm -o "$tmp/spiccato.svg" "$tmp/spiccato.jsm"
 rg -U -q 'class="artic"[^>]*>[[:space:]]*<use[^>]*xlink:href="#E4A6-' "$tmp/spiccato.svg"
 
+jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].articulations = ["scoop"]' \
+    "$fixture" >"$tmp/scoop.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/scoop.mei" "$tmp/scoop.jsm"
+rg -q '<artic[^>]*artic="scoop"' "$tmp/scoop.mei"
+
+jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].articulations = ["plop"]' \
+    "$fixture" >"$tmp/plop.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/plop.mei" "$tmp/plop.jsm"
+rg -q '<artic[^>]*artic="plop"' "$tmp/plop.mei"
+
+jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].articulations = ["doit"]' \
+    "$fixture" >"$tmp/doit.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/doit.mei" "$tmp/doit.jsm"
+rg -q '<artic[^>]*artic="doit"' "$tmp/doit.mei"
+
+jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].articulations = ["falloff"]' \
+    "$fixture" >"$tmp/falloff.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/falloff.mei" "$tmp/falloff.jsm"
+rg -q '<artic[^>]*artic="fall"' "$tmp/falloff.mei"
+
 echo "JSM native smoke passed: stable IDs present; written accidentals=$written_accidentals"
 
 jq '.score.conductorTrack.measures[0].events = [{
