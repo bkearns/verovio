@@ -38,7 +38,9 @@ rg -U -q 'class="artic"[^>]*>[[:space:]]*<use[^>]*xlink:href="#E4AC-' "$tmp/stro
 jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].articulations = ["detached-legato"]' \
     "$fixture" >"$tmp/detached-legato.jsm"
 "$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/detached-legato.mei" "$tmp/detached-legato.jsm"
-rg -q '<artic[^>]*artic="stacc ten"' "$tmp/detached-legato.mei"
+rg -q '<artic[^>]*artic="stacc"' "$tmp/detached-legato.mei"
+rg -q '<artic[^>]*artic="ten"' "$tmp/detached-legato.mei"
+! rg -q '<artic[^>]*artic="stacc ten"' "$tmp/detached-legato.mei"
 
 jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].articulations = ["spiccato"]' \
     "$fixture" >"$tmp/spiccato.jsm"
@@ -68,11 +70,16 @@ rg -q '<artic[^>]*artic="fall"' "$tmp/falloff.mei"
 jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].articulations = ["breath-mark"]' \
     "$fixture" >"$tmp/breath-mark.jsm"
 "$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/breath-mark.mei" "$tmp/breath-mark.jsm"
-rg -q '<breath[^>]*startid="#event-b-flat-1"' "$tmp/breath-mark.mei"
+rg -q '<breath[^>]*staff="1"[^>]*tstamp="1.5"' "$tmp/breath-mark.mei"
 if rg -q '<artic' "$tmp/breath-mark.mei"; then
     echo "breath-mark rendered as a generic articulation" >&2
     exit 1
 fi
+
+jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].articulations = ["caesura"]' \
+    "$fixture" >"$tmp/caesura.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/caesura.mei" "$tmp/caesura.jsm"
+rg -q '<caesura[^>]*staff="1"[^>]*tstamp="1.5"' "$tmp/caesura.mei"
 
 echo "JSM native smoke passed: stable IDs present; written accidentals=$written_accidentals"
 

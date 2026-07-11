@@ -28,6 +28,7 @@
 #include "artic.h"
 #include "beam.h"
 #include "breath.h"
+#include "caesura.h"
 #include "chord.h"
 #include "clef.h"
 #include "doc.h"
@@ -279,7 +280,8 @@ namespace {
         return true;
     }
 
-    bool AddArticulations(Object *event, const JObject &source, Measure *measure, const std::string &path)
+    bool AddArticulations(
+        Object *event, const JObject &source, Measure *measure, const std::string &path, int staffNumber, int beatType)
     {
         const JArray *values = ArrayAt(source, "articulations", path, false);
         if (!values) return true;
@@ -300,15 +302,36 @@ namespace {
             }
             if (name == "breath-mark") {
                 Breath *breath = new Breath();
-                breath->SetStartid("#" + event->GetID());
+                long double onset = 0.0L;
+                long double duration = 0.0L;
+                if (!RationalAt(source, "onset", path, onset) || !RationalAt(source, "duration", path, duration))
+                    return false;
+                breath->SetStaff({ staffNumber });
+                breath->SetTstamp(static_cast<double>(onset + duration) * beatType / 4.0 + 0.5);
                 measure->AddChild(breath);
+                continue;
+            }
+            if (name == "caesura") {
+                Caesura *caesura = new Caesura();
+                long double onset = 0.0L;
+                long double duration = 0.0L;
+                if (!RationalAt(source, "onset", path, onset) || !RationalAt(source, "duration", path, duration))
+                    return false;
+                caesura->SetStaff({ staffNumber });
+                caesura->SetTstamp(static_cast<double>(onset + duration) * beatType / 4.0 + 0.5);
+                measure->AddChild(caesura);
                 continue;
             }
             if (event->Is(REST) || event->Is(MREST)) {
                 return Fail("JSM_UNSUPPORTED_REST_ARTICULATION", path + "/articulations/" + std::to_string(i), name);
             }
             if (name == "detached-legato") {
-                result.insert(result.end(), { ARTICULATION_stacc, ARTICULATION_ten });
+                Artic *staccato = new Artic();
+                staccato->SetArtic({ ARTICULATION_stacc });
+                event->AddChild(staccato);
+                Artic *tenuto = new Artic();
+                tenuto->SetArtic({ ARTICULATION_ten });
+                event->AddChild(tenuto);
                 continue;
             }
             const data_ARTICULATION value = Articulation(name);
@@ -2346,7 +2369,8 @@ bool JsmInput::Import(const std::string &data)
                         else {
                             return Fail("JSM_UNSUPPORTED_EVENT", eventPath + "/type", type);
                         }
-                        if (!AddArticulations(element, event, measure, eventPath)) {
+                        if (!AddArticulations(
+                                element, event, measure, eventPath, binding->second.number, InitialBeatType(part))) {
                             delete element;
                             return false;
                         }
