@@ -27,6 +27,7 @@
 #include "iodarms.h"
 #include "iogabc.h"
 #include "iohumdrum.h"
+#include "iojsm.h"
 #include "iomei.h"
 #include "iomusxml.h"
 #include "iopae.h"
@@ -189,6 +190,21 @@ FileFormat Toolkit::IdentifyInputFrom(const std::string &data)
         // MuseData may contain '@' as first character, so needs
         // to be checked before PAE identification.
         return MUSEDATAHUM;
+    }
+    const std::string::size_type first = data.find_first_not_of(" \t\r\n");
+    if (first != std::string::npos) {
+        if (data[first] == '{') {
+            jsonxx::Object candidate;
+            if (candidate.parse(data) && candidate.has<jsonxx::String>("format")
+                && candidate.get<jsonxx::String>("format") == "JSM")
+                return JSM;
+        }
+        else if (data[first] == '[') {
+            jsonxx::Array candidate;
+            if (candidate.parse(data) && !candidate.empty() && candidate.has<jsonxx::String>(0)
+                && candidate.get<jsonxx::String>(0) == "JSM")
+                return JSM;
+        }
     }
     if (data[0] == '@' || data[0] == '{') {
         return PAE;
@@ -651,6 +667,9 @@ bool Toolkit::LoadData(const std::string &data, bool resetLogBuffer)
 #endif
     else if (inputFrom == MEI) {
         input = new MEIInput(&m_doc);
+    }
+    else if (inputFrom == JSM) {
+        input = new JsmInput(&m_doc);
     }
     else if (inputFrom == SERIALIZATION) {
         MEIInput *meiInput = new MEIInput(&m_doc);

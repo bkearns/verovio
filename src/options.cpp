@@ -925,7 +925,7 @@ Options::Options()
 
     m_inputFrom.SetInfo("Input from",
         "Select input format from: \"abc\", \"cmme.xml\", \"darms\", \"esac\", \"gabc\", \"humdrum\", "
-        "\"mei\", \"pae\", "
+        "\"jsm\", \"mei\", \"pae\", "
         "\"volpiano\", \"xml\" "
         "(musicxml), \"musicxml-hum\" (musicxml via humdrum) or \"mei-pb-serialized\"");
     m_inputFrom.Init("mei");
@@ -2071,6 +2071,9 @@ bool Options::SetInputFrom(std::string const &inputFrom)
     }
     else if (inputFrom == "mei-pb-serialized") {
         m_inputFromFormat = SERIALIZATION;
+    }
+    else if (inputFrom == "jsm") {
+        m_inputFromFormat = JSM;
     }
     else if (inputFrom == "auto") {
         m_inputFromFormat = AUTO;

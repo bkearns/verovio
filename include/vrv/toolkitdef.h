@@ -31,7 +31,8 @@ enum FileFormat {
     MIDI,
     TIMEMAP,
     EXPANSIONMAP,
-    SERIALIZATION
+    SERIALIZATION,
+    JSM
 };
 
 enum { LOG_OFF = 0, LOG_ERROR, LOG_WARNING, LOG_INFO, LOG_DEBUG };
