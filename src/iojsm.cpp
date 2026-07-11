@@ -544,8 +544,8 @@ int InitialBeatType(const JObject &part)
 }
 
 bool AddDirectionRef(const JObject &reference, const JObject &conductor, const std::string &path,
-    const std::map<std::string, StaffBinding> &staffBindings, int beatType, std::set<std::string> &renderedOnce,
-    Measure *measure)
+    const std::string &defaultStaffId, const std::map<std::string, StaffBinding> &staffBindings, int beatType,
+    std::set<std::string> &renderedOnce, Measure *measure)
 {
     std::string referenceId;
     std::string conductorId;
@@ -553,9 +553,9 @@ bool AddDirectionRef(const JObject &reference, const JObject &conductor, const s
     std::string staffId;
     if (!StringAt(reference, "id", path, referenceId)
         || !StringAt(reference, "conductorEventRef", path, conductorId)
-        || !StringAt(conductor, "kind", "/score/conductorTrack", kind)
-        || !StringAt(reference, "staffId", path, staffId))
+        || !StringAt(conductor, "kind", "/score/conductorTrack", kind))
         return false;
+    if (!StringAt(reference, "staffId", path, staffId, false)) staffId = defaultStaffId;
     auto binding = staffBindings.find(staffId);
     if (binding == staffBindings.end()) return Fail("JSM_UNKNOWN_STAFF", path + "/staffId", staffId);
 
@@ -1114,7 +1114,11 @@ bool JsmInput::Import(const std::string &data)
                     if (conductor == conductorEvents.end()) {
                         return Fail("JSM_UNKNOWN_CONDUCTOR_EVENT", directionPath + "/conductorEventRef", conductorId);
                     }
-                    if (!AddDirectionRef(direction, *conductor->second, directionPath, staffBindings,
+                    std::string defaultStaffId;
+                    if (!partStaves->has<JObject>(0)
+                        || !StringAt(partStaves->get<JObject>(0), "id", "/score/parts/staves/0", defaultStaffId))
+                        return false;
+                    if (!AddDirectionRef(direction, *conductor->second, directionPath, defaultStaffId, staffBindings,
                             InitialBeatType(part), renderedConductorEvents, measure))
                         return false;
                 }
