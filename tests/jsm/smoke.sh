@@ -474,4 +474,44 @@ for invalid in "${!invalid_context_changes[@]}"; do
     rg -q "${invalid_context_codes[$invalid]}" "$tmp/invalid-context-$invalid.log"
 done
 
+jq '.score.conductorTrack.measures[0].events = [{
+        id:"rich-dynamics", onset:[0,1], duration:[0,1], order:0, kind:"direction",
+        placement:"below", value:{dynamic:"sf"}, dynamics:[
+            {type:"sf"}, {type:"sfp"}, {type:"sfz"}, {type:"fp"}, {type:"rfz"},
+            {type:"other", text:"subito niente"}
+        ]
+    }]
+    | .score.parts[0].measures[0].conductorEventRefs = ["rich-dynamics"]
+    | .score.parts[0].measures[0].measureEvents += [{
+        type:"directionRef", id:"rich-dynamics-ref", onset:[0,1], duration:[0,1], order:0,
+        conductorEventRef:"rich-dynamics", staffId:"staff-1", placement:"below"
+    }]' "$fixture" >"$tmp/rich-dynamics.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/rich-dynamics.mei" "$tmp/rich-dynamics.jsm"
+"$verovio" -r "$repo/data" -f jsm -o "$tmp/rich-dynamics.svg" "$tmp/rich-dynamics.jsm"
+python3 - "$tmp/rich-dynamics.mei" "$tmp/rich-dynamics.svg" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+mei = ET.parse(sys.argv[1]).getroot()
+dynamics = [element for element in mei.iter() if element.tag.rsplit("}", 1)[-1] == "dynam"]
+if len(dynamics) != 1:
+    raise SystemExit(f"expected one rich dynamics element, found {len(dynamics)}")
+dynamic = dynamics[0]
+expected_attributes = {"place": "below", "staff": "1", "tstamp": "1", "vgrp": "2000"}
+actual_attributes = {key: dynamic.attrib.get(key) for key in expected_attributes}
+if actual_attributes != expected_attributes:
+    raise SystemExit(f"rich dynamics placement mismatch: {actual_attributes!r}")
+if "".join(dynamic.itertext()) != "sfsfpsfzfprfz subito niente":
+    raise SystemExit(f"rich dynamics order/spacing mismatch: {''.join(dynamic.itertext())!r}")
+
+svg = ET.parse(sys.argv[2]).getroot()
+groups = [
+    element
+    for element in svg.iter()
+    if "dynam" in element.attrib.get("class", "").split()
+]
+if len(groups) != 1 or "subito niente" not in "".join(groups[0].itertext()):
+    raise SystemExit("expected rich dynamics, including other text, in one visible SVG group")
+PY
+
 echo "JSM smoke passed: compact validation, contexts, credits, and native event engraving"

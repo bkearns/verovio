@@ -1067,7 +1067,33 @@ namespace {
             }
             else {
                 const JObject *value = ObjectAt(conductor, "value", "/score/conductorTrack/events", false);
-                if (!value || !value->has<jsonxx::String>("dynamic")) {
+                const JArray *dynamics = ArrayAt(conductor, "dynamics", "/score/conductorTrack/events", false);
+                std::string dynamicText;
+                if (dynamics && !dynamics->empty()) {
+                    for (unsigned int i = 0; i < dynamics->size(); ++i) {
+                        const std::string dynamicPath = "/score/conductorTrack/events/dynamics/" + std::to_string(i);
+                        if (!dynamics->has<JObject>(i)) {
+                            return Fail("JSM_INVALID_DIRECTION", dynamicPath, "expected object");
+                        }
+                        const JObject &entry = dynamics->get<JObject>(i);
+                        std::string type;
+                        if (!StringAt(entry, "type", dynamicPath, type)) return false;
+                        if (type == "other") {
+                            std::string text;
+                            if (!StringAt(entry, "text", dynamicPath, text)) return false;
+                            if (i != 0) dynamicText += " ";
+                            dynamicText += text;
+                            if (i + 1 != dynamics->size()) dynamicText += " ";
+                        }
+                        else {
+                            dynamicText += type;
+                        }
+                    }
+                }
+                else if (value && value->has<jsonxx::String>("dynamic")) {
+                    dynamicText = value->get<jsonxx::String>("dynamic");
+                }
+                else {
                     return Fail("JSM_UNSUPPORTED_DIRECTION", "/score/conductorTrack/events/value",
                         "expected a direction string or an object with a dynamic string");
                 }
@@ -1075,8 +1101,9 @@ namespace {
                 dynamic->SetTstamp(timestamp);
                 dynamic->SetPlace(Placement(reference));
                 dynamic->SetStaff(staffNumbers);
+                dynamic->SetVgrp(2000);
                 Text *text = new Text();
-                text->SetText(UTF8to32(value->get<jsonxx::String>("dynamic")));
+                text->SetText(UTF8to32(dynamicText));
                 dynamic->AddChild(text);
                 control = dynamic;
             }
