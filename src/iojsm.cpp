@@ -168,6 +168,15 @@ namespace {
         return (iter == durations.end()) ? DURATION_NONE : iter->second;
     }
 
+    std::u32string MetronomeGlyph(const std::string &type)
+    {
+        static const std::map<std::string, std::u32string> glyphs = { { "breve", U"\xECA0" }, { "whole", U"\xECA2" },
+            { "half", U"\xECA3" }, { "quarter", U"\xECA5" }, { "eighth", U"\xECA7" }, { "16th", U"\xECA9" },
+            { "32nd", U"\xECAB" }, { "64th", U"\xECAD" }, { "128th", U"\xECAF" }, { "256th", U"\xECB1" } };
+        auto iter = glyphs.find(type);
+        return (iter == glyphs.end()) ? std::u32string() : iter->second;
+    }
+
     data_PITCHNAME PitchName(const std::string &step)
     {
         if (step == "C") return PITCHNAME_c;
@@ -790,7 +799,29 @@ namespace {
             const JObject *tempoSource = ObjectAt(conductor, "tempo", "/score/conductorTrack/events", false);
             const JArray *bpm
                 = tempoSource ? ArrayAt(*tempoSource, "bpm", "/score/conductorTrack/events/tempo", false) : nullptr;
-            if (bpm) tempo->SetMidiBpm(RationalValue(*bpm));
+            if (tempoSource && tempoSource->has<jsonxx::String>("beatUnit")) {
+                const std::string beatUnit = tempoSource->get<jsonxx::String>("beatUnit");
+                tempo->SetMmUnit(DurationFromType(beatUnit));
+                Rend *rend = new Rend();
+                rend->SetGlyphAuth("smufl");
+                Text *text = new Text();
+                text->SetText(MetronomeGlyph(beatUnit));
+                rend->AddChild(text);
+                tempo->AddChild(rend);
+            }
+            if (bpm) {
+                const double value = RationalValue(*bpm);
+                tempo->SetMidiBpm(value);
+                tempo->SetMm(value);
+                Text *separator = new Text();
+                separator->SetText(UTF8to32(" = "));
+                tempo->AddChild(separator);
+                std::ostringstream bpmText;
+                bpmText << value;
+                Text *text = new Text();
+                text->SetText(UTF8to32(bpmText.str()));
+                tempo->AddChild(text);
+            }
             control = tempo;
             renderedOnce.insert(conductorId);
         }

@@ -32,6 +32,40 @@ fi
 
 echo "JSM native smoke passed: stable IDs present; written accidentals=$written_accidentals"
 
+jq '.score.conductorTrack.measures[0].events = [{
+        id:"tempo-quarter-96", onset:[0,1], duration:[0,1], order:0, kind:"tempo",
+        tempo:{beatUnit:"quarter", bpm:[96,1], transition:"immediate"}
+    }]
+    | .score.parts[0].measures[0].conductorEventRefs = ["tempo-quarter-96"]
+    | .score.parts[0].measures[0].measureEvents += [{
+        type:"directionRef", id:"tempo-quarter-96-ref", onset:[0,1], duration:[0,1], order:0,
+        conductorEventRef:"tempo-quarter-96", staffId:"staff-1", placement:"above"
+    }]' "$fixture" >"$tmp/metronome.jsm"
+"$verovio" -r "$repo/data" -f jsm -o "$tmp/metronome.svg" "$tmp/metronome.jsm"
+python3 - "$tmp/metronome.svg" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+tempo = next(
+    (
+        element
+        for element in root.iter()
+        if "tempo" in element.attrib.get("class", "").split()
+    ),
+    None,
+)
+if tempo is None or not list(tempo) or tempo.attrib.get("display") == "none" or tempo.attrib.get("visibility") == "hidden":
+    raise SystemExit("expected a non-empty visible tempo SVG group")
+if not any(
+    element.attrib.get("font-family") == "Leipzig" and "\ueca5" in "".join(element.itertext())
+    for element in tempo.iter()
+):
+    raise SystemExit("expected Leipzig quarter-note beat-unit glyph U+ECA5 in tempo SVG group")
+if "96" not in "".join(tempo.itertext()):
+    raise SystemExit("expected 96 in tempo SVG group")
+PY
+
 jq '.score.parts[0] as $source
     | [$source | .. | objects | .id? // empty] as $ids
     | (reduce $ids[] as $id ($source;
