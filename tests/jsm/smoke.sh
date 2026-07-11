@@ -182,6 +182,12 @@ if direction.attrib.get("type") != "dacapo":
     raise SystemExit("expected D.C. navigation type dacapo")
 PY
 
+jq '.score.conductorTrack.measures[0].events[0].value = "D.S. al Coda"' \
+    "$tmp/direction-dc.jsm" >"$tmp/direction-ds-al-coda.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/direction-ds-al-coda.mei" "$tmp/direction-ds-al-coda.jsm"
+rg -q '<dir[^>]*type="dalsegno"' "$tmp/direction-ds-al-coda.mei"
+rg -q '<rend[^>]*halign="right"[^>]*>D.S. al Coda</rend>' "$tmp/direction-ds-al-coda.mei"
+
 jq '.score.conductorTrack.measures[0].events = [{
         id:"rehearsal-a", onset:[0,1], duration:[0,1], order:0, kind:"rehearsal", value:"A",
         rehearsal:{enclosure:"circle"}

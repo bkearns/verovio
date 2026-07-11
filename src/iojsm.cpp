@@ -927,8 +927,17 @@ namespace {
                 direction->SetPlace(Placement(reference));
                 direction->SetStaff(staffNumbers);
                 Object *textParent = direction;
-                if (value == "D.C.") {
-                    direction->SetType("dacapo");
+                std::string navigationType;
+                if (value.starts_with("D.C."))
+                    navigationType = "dacapo";
+                else if (value.starts_with("D.S."))
+                    navigationType = "dalsegno";
+                else if (value == "Fine")
+                    navigationType = "fine";
+                else if (value == "To Coda")
+                    navigationType = "tocoda";
+                if (!navigationType.empty()) {
+                    direction->SetType(navigationType);
                     Rend *rend = new Rend();
                     rend->SetHalign(HORIZONTALALIGNMENT_right);
                     direction->AddChild(rend);
