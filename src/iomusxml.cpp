@@ -2084,7 +2084,8 @@ void MusicXmlInput::ReadMusicXmlAttributes(
     pugi::xml_node time = node.child("time");
 
     // for now only read first key change in first part and update scoreDef
-    if ((key || time || divisionChange) && node.select_node("ancestor::part[not(preceding-sibling::part)]")
+    if ((key || time || divisionChange) && (m_durTotal == 0)
+        && node.select_node("ancestor::part[not(preceding-sibling::part)]")
         && !node.select_node("preceding-sibling::attributes/key")) {
         ScoreDef *scoreDef = GetOrCreateLastScoreDef(section);
         assert(scoreDef);
@@ -2099,6 +2100,17 @@ void MusicXmlInput::ReadMusicXmlAttributes(
 
         if (divisions) {
             scoreDef->SetPpq(divisions.text().as_int());
+        }
+    }
+    else if ((key || time) && node.select_node("ancestor::part[not(preceding-sibling::part)]")) {
+        Layer *layer = SelectLayer(node, measure);
+        if (key) {
+            KeySig *meiKey = ConvertKey(key);
+            this->AddLayerElement(layer, meiKey);
+            this->ResetAccidentals(meiKey);
+        }
+        if (time) {
+            this->ReadMusicXMLMeterSig(time, layer);
         }
     }
     else if (time && node.select_node("ancestor::part[(preceding-sibling::part)]")) {

@@ -27,10 +27,14 @@
 #include "accid.h"
 #include "artic.h"
 #include "beam.h"
+#include "breath.h"
+#include "caesura.h"
 #include "chord.h"
 #include "clef.h"
+#include "dir.h"
 #include "doc.h"
 #include "dynam.h"
+#include "ending.h"
 #include "fermata.h"
 #include "gliss.h"
 #include "grpsym.h"
@@ -44,7 +48,9 @@
 #include "mdiv.h"
 #include "measure.h"
 #include "metersig.h"
+#include "mordent.h"
 #include "mrest.h"
+#include "multirest.h"
 #include "note.h"
 #include "octave.h"
 #include "pb.h"
@@ -53,6 +59,7 @@
 #include "pghead.h"
 #include "reh.h"
 #include "rend.h"
+#include "repeatmark.h"
 #include "rest.h"
 #include "sb.h"
 #include "score.h"
@@ -67,6 +74,7 @@
 #include "tie.h"
 #include "trill.h"
 #include "tuplet.h"
+#include "turn.h"
 #include "vrv.h"
 
 namespace vrv {
@@ -168,6 +176,15 @@ namespace {
         return (iter == durations.end()) ? DURATION_NONE : iter->second;
     }
 
+    std::u32string MetronomeGlyph(const std::string &type)
+    {
+        static const std::map<std::string, std::u32string> glyphs = { { "breve", U"\xECA0" }, { "whole", U"\xECA2" },
+            { "half", U"\xECA3" }, { "quarter", U"\xECA5" }, { "eighth", U"\xECA7" }, { "16th", U"\xECA9" },
+            { "32nd", U"\xECAB" }, { "64th", U"\xECAD" }, { "128th", U"\xECAF" }, { "256th", U"\xECB1" } };
+        auto iter = glyphs.find(type);
+        return (iter == glyphs.end()) ? std::u32string() : iter->second;
+    }
+
     data_PITCHNAME PitchName(const std::string &step)
     {
         if (step == "C") return PITCHNAME_c;
@@ -221,8 +238,14 @@ namespace {
         if (name == "staccato") return ARTICULATION_stacc;
         if (name == "tenuto") return ARTICULATION_ten;
         if (name == "accent") return ARTICULATION_acc;
+        if (name == "strong-accent") return ARTICULATION_marc;
         if (name == "marcato") return ARTICULATION_marc;
         if (name == "staccatissimo") return ARTICULATION_stacciss;
+        if (name == "spiccato") return ARTICULATION_spicc;
+        if (name == "scoop") return ARTICULATION_scoop;
+        if (name == "plop") return ARTICULATION_plop;
+        if (name == "doit") return ARTICULATION_doit;
+        if (name == "falloff") return ARTICULATION_fall;
         return ARTICULATION_NONE;
     }
 
@@ -257,13 +280,15 @@ namespace {
             // pitch.alter is semantic. A written accidental is only needed when it
             // changes the active key/measure state, or when explicitly courtesy.
             if (alter != activeAlter || courtesy) accid->SetAccid(accidental);
+            if (courtesy) accid->SetEnclose(ENCLOSURE_paren);
             note->AddChild(accid);
         }
         accidentalState[stateKey] = alter;
         return true;
     }
 
-    bool AddArticulations(Object *event, const JObject &source, Measure *measure, const std::string &path)
+    bool AddArticulations(
+        Object *event, const JObject &source, Measure *measure, const std::string &path, int staffNumber, int beatType)
     {
         const JArray *values = ArrayAt(source, "articulations", path, false);
         if (!values) return true;
@@ -282,8 +307,39 @@ namespace {
                 measure->AddChild(fermata);
                 continue;
             }
+            if (name == "breath-mark") {
+                Breath *breath = new Breath();
+                long double onset = 0.0L;
+                long double duration = 0.0L;
+                if (!RationalAt(source, "onset", path, onset) || !RationalAt(source, "duration", path, duration))
+                    return false;
+                breath->SetStaff({ staffNumber });
+                breath->SetTstamp(static_cast<double>(onset + duration) * beatType / 4.0 + 0.5);
+                measure->AddChild(breath);
+                continue;
+            }
+            if (name == "caesura") {
+                Caesura *caesura = new Caesura();
+                long double onset = 0.0L;
+                long double duration = 0.0L;
+                if (!RationalAt(source, "onset", path, onset) || !RationalAt(source, "duration", path, duration))
+                    return false;
+                caesura->SetStaff({ staffNumber });
+                caesura->SetTstamp(static_cast<double>(onset + duration) * beatType / 4.0 + 0.5);
+                measure->AddChild(caesura);
+                continue;
+            }
             if (event->Is(REST) || event->Is(MREST)) {
                 return Fail("JSM_UNSUPPORTED_REST_ARTICULATION", path + "/articulations/" + std::to_string(i), name);
+            }
+            if (name == "detached-legato") {
+                Artic *staccato = new Artic();
+                staccato->SetArtic({ ARTICULATION_stacc });
+                event->AddChild(staccato);
+                Artic *tenuto = new Artic();
+                tenuto->SetArtic({ ARTICULATION_ten });
+                event->AddChild(tenuto);
+                continue;
             }
             const data_ARTICULATION value = Articulation(name);
             if (value == ARTICULATION_NONE) {
@@ -295,6 +351,46 @@ namespace {
             Artic *artic = new Artic();
             artic->SetArtic(result);
             event->AddChild(artic);
+        }
+        return true;
+    }
+
+    bool AddOrnaments(Object *event, const JObject &source, Measure *measure, const std::string &path, int staffNumber)
+    {
+        const JArray *values = ArrayAt(source, "ornaments", path, false);
+        if (!values) return true;
+        if (!event->Is(NOTE)) {
+            return Fail("JSM_UNSUPPORTED_ORNAMENT_EVENT", path + "/ornaments", "ornaments require a note event");
+        }
+        for (unsigned int i = 0; i < values->size(); ++i) {
+            const std::string ornamentPath = path + "/ornaments/" + std::to_string(i);
+            if (!values->has<jsonxx::String>(i)) {
+                return Fail("JSM_INVALID_ORNAMENT", ornamentPath, "expected string");
+            }
+            const std::string name = values->get<jsonxx::String>(i);
+            ControlElement *ornament = nullptr;
+            if (name == "trill-mark") {
+                ornament = new Trill();
+            }
+            else if (name == "mordent" || name == "inverted-mordent") {
+                Mordent *mordent = new Mordent();
+                mordent->SetForm(name == "mordent" ? mordentLog_FORM_lower : mordentLog_FORM_upper);
+                ornament = mordent;
+            }
+            else if (name == "turn" || name == "inverted-turn" || name == "delayed-turn") {
+                Turn *turn = new Turn();
+                turn->SetForm(name == "inverted-turn" ? turnLog_FORM_lower : turnLog_FORM_upper);
+                if (name == "delayed-turn") turn->SetDelayed(BOOLEAN_true);
+                ornament = turn;
+            }
+            else {
+                return Fail("JSM_UNSUPPORTED_ORNAMENT", ornamentPath, name);
+            }
+            ornament->SetID(event->GetID() + "-ornament-" + std::to_string(i + 1));
+            TimePointInterface *timePoint = ornament->GetTimePointInterface();
+            timePoint->SetStaff({ staffNumber });
+            timePoint->SetStartid("#" + event->GetID());
+            measure->AddChild(ornament);
         }
         return true;
     }
@@ -751,6 +847,88 @@ namespace {
         return time ? IntAt(*time, "beatType", 4) : 4;
     }
 
+    std::string NavigationType(const std::string &value)
+    {
+        if (value.starts_with("D.C.")) return "dacapo";
+        if (value.starts_with("D.S.")) return "dalsegno";
+        if (value == "Fine") return "fine";
+        if (value == "To Coda") return "tocoda";
+        return {};
+    }
+
+    bool IsNavigationText(const JObject &event)
+    {
+        if (event.get<jsonxx::String>("kind", "") != "direction" || !event.has<jsonxx::String>("value")) return false;
+        return !NavigationType(event.get<jsonxx::String>("value")).empty();
+    }
+
+    bool AddMeasureNavigation(const JObject &navigation, const JObject &partMeasure, const JArray &partStaves,
+        const std::map<std::string, StaffBinding> &staffBindings, int beatType, bool addJump, Measure *measure)
+    {
+        std::string staffId;
+        if (!partStaves.has<JObject>(0)
+            || !StringAt(partStaves.get<JObject>(0), "id", "/score/parts/staves/0", staffId))
+            return false;
+        const auto binding = staffBindings.find(staffId);
+        if (binding == staffBindings.end()) {
+            return Fail("JSM_UNKNOWN_STAFF", "/score/parts/staves/0/id", staffId);
+        }
+        long double duration = 0.0L;
+        if (!RationalAt(partMeasure, "duration", "/score/parts/measures", duration)) return false;
+        const double timestamp = 1.0 + static_cast<double>(duration) * beatType / 4.0;
+        const std::vector<int> staffNumbers{ binding->second.number };
+
+        const JArray *markers = ArrayAt(navigation, "markers", "/score/parts/measures/navigation", false);
+        std::set<std::string> renderedMarkers;
+        if (markers) {
+            for (unsigned int i = 0; i < markers->size(); ++i) {
+                if (!markers->has<jsonxx::String>(i)) {
+                    return Fail(
+                        "JSM_INVALID_NAVIGATION", "/score/parts/measures/navigation/markers", "expected strings");
+                }
+                const std::string marker = markers->get<jsonxx::String>(i);
+                repeatMarkLog_FUNC function = repeatMarkLog_FUNC_NONE;
+                if (marker == "segno")
+                    function = repeatMarkLog_FUNC_segno;
+                else if (marker == "coda")
+                    function = repeatMarkLog_FUNC_coda;
+                else
+                    continue;
+                if (!renderedMarkers.insert(marker).second) continue;
+                RepeatMark *repeatMark = new RepeatMark();
+                repeatMark->SetStaff(staffNumbers);
+                repeatMark->SetTstamp(timestamp);
+                repeatMark->SetFunc(function);
+                measure->AddChild(repeatMark);
+            }
+        }
+
+        if (!addJump || !navigation.has<jsonxx::String>("jump")) return true;
+        static const std::map<std::string, std::pair<std::string, std::string>> jumps = {
+            { "dc", { "dacapo", "D.C." } },
+            { "ds", { "dalsegno", "D.S." } },
+            { "dc-al-fine", { "dacapo", "D.C. al Fine" } },
+            { "ds-al-coda", { "dalsegno", "D.S. al Coda" } },
+            { "fine", { "fine", "Fine" } },
+            { "to-coda", { "tocoda", "To Coda" } },
+        };
+        const std::string jump = navigation.get<jsonxx::String>("jump");
+        const auto value = jumps.find(jump);
+        if (value == jumps.end()) return true;
+        Dir *direction = new Dir();
+        direction->SetType(value->second.first);
+        direction->SetStaff(staffNumbers);
+        direction->SetTstamp(timestamp);
+        Rend *rend = new Rend();
+        rend->SetHalign(HORIZONTALALIGNMENT_right);
+        Text *text = new Text();
+        text->SetText(UTF8to32(value->second.second));
+        rend->AddChild(text);
+        direction->AddChild(rend);
+        measure->AddChild(direction);
+        return true;
+    }
+
     bool AddDirectionRef(const JObject &reference, const JObject &conductor, const std::string &path,
         const std::string &defaultStaffId, const std::map<std::string, StaffBinding> &staffBindings, int beatType,
         std::set<std::string> &renderedOnce, Measure *measure)
@@ -771,10 +949,11 @@ namespace {
         const double timestamp = 1.0 + (onset ? RationalValue(*onset) * beatType / 4.0 : 0.0);
         const std::vector<int> staffNumbers{ binding->second.number };
         ControlElement *control = nullptr;
+        const JObject *metronome = ObjectAt(conductor, "metronome", "/score/conductorTrack/events", false);
 
         // MusicXML projects global tempo and rehearsal events only on the first
         // referring staff, while dynamics remain part-local.
-        if ((kind == "tempo" || kind == "rehearsal") && renderedOnce.contains(conductorId)) return true;
+        if ((kind == "tempo" || kind == "rehearsal" || metronome) && renderedOnce.contains(conductorId)) return true;
         const bool firstRendering = !renderedOnce.contains(conductorId);
 
         if (kind == "tempo") {
@@ -790,7 +969,31 @@ namespace {
             const JObject *tempoSource = ObjectAt(conductor, "tempo", "/score/conductorTrack/events", false);
             const JArray *bpm
                 = tempoSource ? ArrayAt(*tempoSource, "bpm", "/score/conductorTrack/events/tempo", false) : nullptr;
-            if (bpm) tempo->SetMidiBpm(RationalValue(*bpm));
+            if (metronome && tempoSource && tempoSource->has<jsonxx::String>("beatUnit")) {
+                const std::string beatUnit = tempoSource->get<jsonxx::String>("beatUnit");
+                tempo->SetMmUnit(DurationFromType(beatUnit));
+                Rend *rend = new Rend();
+                rend->SetGlyphAuth("smufl");
+                Text *text = new Text();
+                text->SetText(MetronomeGlyph(beatUnit));
+                rend->AddChild(text);
+                tempo->AddChild(rend);
+            }
+            if (bpm) {
+                const double value = RationalValue(*bpm);
+                tempo->SetMidiBpm(value);
+                if (metronome) {
+                    tempo->SetMm(value);
+                    Text *separator = new Text();
+                    separator->SetText(UTF8to32(" = "));
+                    tempo->AddChild(separator);
+                    std::ostringstream bpmText;
+                    bpmText << value;
+                    Text *text = new Text();
+                    text->SetText(UTF8to32(bpmText.str()));
+                    tempo->AddChild(text);
+                }
+            }
             control = tempo;
             renderedOnce.insert(conductorId);
         }
@@ -803,7 +1006,9 @@ namespace {
             rehearsal->SetPlace(Placement(reference));
             rehearsal->SetStaff(staffNumbers);
             Rend *rend = new Rend();
-            rend->SetRend(TEXTRENDITION_box);
+            const JObject *rehearsalSource = ObjectAt(conductor, "rehearsal", "/score/conductorTrack/events", false);
+            const std::string enclosure = rehearsalSource ? rehearsalSource->get<jsonxx::String>("enclosure", "") : "";
+            rend->SetRend(enclosure == "circle" ? TEXTRENDITION_circle : TEXTRENDITION_box);
             Text *text = new Text();
             text->SetText(UTF8to32(conductor.get<jsonxx::String>("value")));
             rend->AddChild(text);
@@ -811,20 +1016,101 @@ namespace {
             control = rehearsal;
             renderedOnce.insert(conductorId);
         }
-        else if (kind == "direction") {
-            const JObject *value = ObjectAt(conductor, "value", "/score/conductorTrack/events", false);
-            if (!value || !value->has<jsonxx::String>("dynamic")) {
-                return Fail("JSM_UNSUPPORTED_DIRECTION", "/score/conductorTrack/events/value",
-                    "only direction values with a dynamic string are currently engraved");
+        else if (kind == "direction" && metronome) {
+            const JObject *left = ObjectAt(*metronome, "left", "/score/conductorTrack/events/metronome", false);
+            const JObject *right = ObjectAt(*metronome, "rightNote", "/score/conductorTrack/events/metronome", false);
+            const std::string relation = metronome->get<jsonxx::String>("relation", "");
+            if (!left || !right || !left->has<jsonxx::String>("beatUnit") || !right->has<jsonxx::String>("beatUnit")
+                || relation != "equals") {
+                return Fail("JSM_UNSUPPORTED_DIRECTION", "/score/conductorTrack/events/metronome",
+                    "expected left and rightNote beat units with an equals relation");
             }
-            Dynam *dynamic = new Dynam();
-            dynamic->SetTstamp(timestamp);
-            dynamic->SetPlace(Placement(reference));
-            dynamic->SetStaff(staffNumbers);
-            Text *text = new Text();
-            text->SetText(UTF8to32(value->get<jsonxx::String>("dynamic")));
-            dynamic->AddChild(text);
-            control = dynamic;
+            Tempo *tempo = new Tempo();
+            tempo->SetTstamp(timestamp);
+            tempo->SetPlace(Placement(reference));
+            tempo->SetStaff(staffNumbers);
+            tempo->SetMmUnit(DurationFromType(left->get<jsonxx::String>("beatUnit")));
+            for (const JObject *note : { left, right }) {
+                Rend *rend = new Rend();
+                rend->SetGlyphAuth("smufl");
+                std::u32string glyph = MetronomeGlyph(note->get<jsonxx::String>("beatUnit"));
+                for (int dot = 0; dot < IntAt(*note, "dots", 0); ++dot) glyph += U" \xECB7";
+                Text *text = new Text();
+                text->SetText(glyph);
+                rend->AddChild(text);
+                tempo->AddChild(rend);
+                if (note == left) {
+                    Text *separator = new Text();
+                    separator->SetText(UTF8to32(" = "));
+                    tempo->AddChild(separator);
+                }
+            }
+            control = tempo;
+            renderedOnce.insert(conductorId);
+        }
+        else if (kind == "direction") {
+            if (conductor.has<jsonxx::String>("value")) {
+                const std::string value = conductor.get<jsonxx::String>("value");
+                Dir *direction = new Dir();
+                direction->SetTstamp(timestamp);
+                direction->SetPlace(Placement(reference));
+                direction->SetStaff(staffNumbers);
+                Object *textParent = direction;
+                const std::string navigationType = NavigationType(value);
+                if (!navigationType.empty()) {
+                    direction->SetType(navigationType);
+                    Rend *rend = new Rend();
+                    rend->SetHalign(HORIZONTALALIGNMENT_right);
+                    direction->AddChild(rend);
+                    textParent = rend;
+                }
+                Text *text = new Text();
+                text->SetText(UTF8to32(value));
+                textParent->AddChild(text);
+                control = direction;
+            }
+            else {
+                const JObject *value = ObjectAt(conductor, "value", "/score/conductorTrack/events", false);
+                const JArray *dynamics = ArrayAt(conductor, "dynamics", "/score/conductorTrack/events", false);
+                std::string dynamicText;
+                if (dynamics && !dynamics->empty()) {
+                    for (unsigned int i = 0; i < dynamics->size(); ++i) {
+                        const std::string dynamicPath = "/score/conductorTrack/events/dynamics/" + std::to_string(i);
+                        if (!dynamics->has<JObject>(i)) {
+                            return Fail("JSM_INVALID_DIRECTION", dynamicPath, "expected object");
+                        }
+                        const JObject &entry = dynamics->get<JObject>(i);
+                        std::string type;
+                        if (!StringAt(entry, "type", dynamicPath, type)) return false;
+                        if (type == "other") {
+                            std::string text;
+                            if (!StringAt(entry, "text", dynamicPath, text)) return false;
+                            if (i != 0) dynamicText += " ";
+                            dynamicText += text;
+                            if (i + 1 != dynamics->size()) dynamicText += " ";
+                        }
+                        else {
+                            dynamicText += type;
+                        }
+                    }
+                }
+                else if (value && value->has<jsonxx::String>("dynamic")) {
+                    dynamicText = value->get<jsonxx::String>("dynamic");
+                }
+                else {
+                    return Fail("JSM_UNSUPPORTED_DIRECTION", "/score/conductorTrack/events/value",
+                        "expected a direction string or an object with a dynamic string");
+                }
+                Dynam *dynamic = new Dynam();
+                dynamic->SetTstamp(timestamp);
+                dynamic->SetPlace(Placement(reference));
+                dynamic->SetStaff(staffNumbers);
+                dynamic->SetVgrp(2000);
+                Text *text = new Text();
+                text->SetText(UTF8to32(dynamicText));
+                dynamic->AddChild(text);
+                control = dynamic;
+            }
         }
         else {
             return Fail("JSM_UNSUPPORTED_DIRECTION", "/score/conductorTrack/events/kind", kind);
@@ -964,8 +1250,7 @@ namespace {
         return true;
     }
 
-    bool AddInitialContext(
-        StaffDef *staffDef, const JObject &part, const std::string &staffId, bool &meterAdded, ScoreDef *scoreDef)
+    bool AddInitialContext(StaffDef *staffDef, const JObject &part, const std::string &staffId)
     {
         const JObject *initial = InitialContext(part);
         if (!initial) return true;
@@ -985,13 +1270,8 @@ namespace {
         }
         const JObject *key = ObjectAt(context, "key", "/score/parts/contexts", false);
         if (key && !AddKeySig(staffDef, *key, "/score/parts/contexts/key")) return false;
-        if (!meterAdded) {
-            const JObject *time = ObjectAt(context, "time", "/score/parts/contexts", false);
-            if (time) {
-                if (!AddMeter(scoreDef, *time, "/score/parts/contexts/time")) return false;
-                meterAdded = true;
-            }
-        }
+        const JObject *time = ObjectAt(context, "time", "/score/parts/contexts", false);
+        if (time && !AddMeter(staffDef, *time, "/score/parts/contexts/time")) return false;
         return true;
     }
 
@@ -1675,7 +1955,6 @@ bool JsmInput::Import(const std::string &data)
     score->GetScoreDef()->AddChild(staffGrp);
 
     std::map<std::string, StaffBinding> staffBindings;
-    bool meterAdded = false;
     int nextStaff = 1;
     for (unsigned int partIndex = 0; partIndex < parts->size(); ++partIndex) {
         const std::string partPath = "/score/parts/" + std::to_string(partIndex);
@@ -1711,7 +1990,7 @@ bool JsmInput::Import(const std::string &data)
             if (!partStaffGrp) AddPartLabels(staffDef, part);
             AddTranspositionAndPpq(staffDef, part, ppq);
             (partStaffGrp ? static_cast<Object *>(partStaffGrp) : static_cast<Object *>(staffGrp))->AddChild(staffDef);
-            if (!AddInitialContext(staffDef, part, staffId, meterAdded, score->GetScoreDef())) return false;
+            if (!AddInitialContext(staffDef, part, staffId)) return false;
             staffBindings.emplace(
                 staffId, StaffBinding{ nextStaff, partId, staffId, InitialFifths(part), InitialContextId(part) });
             ++nextStaff;
@@ -1769,12 +2048,46 @@ bool JsmInput::Import(const std::string &data)
                 "JSM_CONFLICTING_METERS", "/score/parts/contexts/time", "all parts must use the same initial meter");
         }
     }
+    unsigned int skipMultiRestUntil = 0;
+    Ending *activeEnding = nullptr;
     for (unsigned int barIndex = 0; barIndex < bars->size(); ++barIndex) {
+        if (barIndex < skipMultiRestUntil) continue;
         const std::string barPath = "/score/logicalBars/" + std::to_string(barIndex);
         if (!bars->has<JObject>(barIndex)) return Fail("JSM_INVALID_BAR", barPath, "expected object");
         const JObject &bar = bars->get<JObject>(barIndex);
         std::string barId;
         if (!StringAt(bar, "id", barPath, barId)) return false;
+        int multiRestCount = 0;
+        if (parts->has<JObject>(0)) {
+            const JArray *measures = ArrayAt(parts->get<JObject>(0), "measures", "/score/parts/0", false);
+            if (measures && measures->has<JObject>(barIndex)) {
+                const JObject *presentation
+                    = ObjectAt(measures->get<JObject>(barIndex), "presentation", "/score/parts/0/measures", false);
+                const JObject *multiRest
+                    = presentation ? ObjectAt(*presentation, "multiRest", "/presentation", false) : nullptr;
+                multiRestCount = multiRest ? IntAt(*multiRest, "count", 0) : 0;
+            }
+        }
+        if (multiRestCount > 0) skipMultiRestUntil = barIndex + static_cast<unsigned int>(multiRestCount);
+        const JObject *primaryNavigation = nullptr;
+        if (parts->has<JObject>(0)) {
+            const JArray *measures = ArrayAt(parts->get<JObject>(0), "measures", "/score/parts/0", false);
+            if (measures && measures->has<JObject>(barIndex)) {
+                primaryNavigation
+                    = ObjectAt(measures->get<JObject>(barIndex), "navigation", "/score/parts/0/measures", false);
+            }
+        }
+        if (primaryNavigation && primaryNavigation->has<JArray>("endingStart")) {
+            const JArray &numbers = primaryNavigation->get<JArray>("endingStart");
+            std::ostringstream value;
+            for (unsigned int i = 0; i < numbers.size(); ++i) {
+                if (i > 0) value << ",";
+                value << (numbers.has<jsonxx::Number>(i) ? static_cast<int>(numbers.get<jsonxx::Number>(i)) : 0);
+            }
+            activeEnding = new Ending();
+            activeEnding->SetN(value.str());
+            section->AddChild(activeEnding);
+        }
         const bool newPage = HasPresentationBreak(*parts, barIndex, "newPage");
         const bool newSystem = HasPresentationBreak(*parts, barIndex, "newSystem");
         if (newPage) section->AddChild(new Pb());
@@ -1922,10 +2235,14 @@ bool JsmInput::Import(const std::string &data)
         measure->SetID(primaryMeasureId);
         measure->m_unsupported.push_back({ "jsm-bar-id", barId });
         measure->SetN(bar.get<jsonxx::String>("number", std::to_string(barIndex + 1)));
-        section->AddChild(measure);
+        if (activeEnding)
+            activeEnding->AddChild(measure);
+        else
+            section->AddChild(measure);
 
         bool repeatStart = false;
         bool repeatEnd = false;
+        std::string rightBarline;
         for (unsigned int partIndex = 0; partIndex < parts->size(); ++partIndex) {
             const JObject &part = parts->get<JObject>(partIndex);
             const JArray *partMeasures = ArrayAt(part, "measures", "/score/parts/" + std::to_string(partIndex));
@@ -1943,9 +2260,13 @@ bool JsmInput::Import(const std::string &data)
                 return Fail("JSM_MEASURE_ALIGNMENT", "/score/parts/measures/barId", "barId does not match logical bar");
             }
             const JObject *navigation = ObjectAt(partMeasure, "navigation", "/score/parts/measures", false);
+            bool hasRenderedNavigationJump = false;
             if (navigation) {
                 repeatStart = repeatStart || BoolAt(*navigation, "repeatStart", false);
                 repeatEnd = repeatEnd || navigation->has<jsonxx::Number>("repeatEnd");
+                if (navigation->has<jsonxx::String>("rightBarline")) {
+                    rightBarline = navigation->get<jsonxx::String>("rightBarline");
+                }
             }
             const JArray *measureStaves = ArrayAt(partMeasure, "staves", "/score/parts/measures");
             if (!measureStaves) return false;
@@ -2134,6 +2455,12 @@ bool JsmInput::Import(const std::string &data)
                     };
                     const JArray *events = ArrayAt(voice, "events", "/score/parts/measures/staves/voices");
                     if (!events) return false;
+                    if (multiRestCount > 0) {
+                        MultiRest *multiRest = new MultiRest();
+                        multiRest->SetNum(multiRestCount);
+                        layer->AddChild(multiRest);
+                        continue;
+                    }
                     long double expectedOnset = 0.0L;
                     Tuplet *activeTuplet = nullptr;
                     std::string tupletEndId;
@@ -2296,7 +2623,9 @@ bool JsmInput::Import(const std::string &data)
                         else {
                             return Fail("JSM_UNSUPPORTED_EVENT", eventPath + "/type", type);
                         }
-                        if (!AddArticulations(element, event, measure, eventPath)) {
+                        if (!AddArticulations(
+                                element, event, measure, eventPath, binding->second.number, InitialBeatType(part))
+                            || !AddOrnaments(element, event, measure, eventPath, binding->second.number)) {
                             delete element;
                             return false;
                         }
@@ -2393,11 +2722,41 @@ bool JsmInput::Import(const std::string &data)
                     if (!AddDirectionRef(direction, *conductor->second, directionPath, defaultStaffId, staffBindings,
                             InitialBeatType(part), renderedConductorEvents, measure))
                         return false;
+                    hasRenderedNavigationJump = hasRenderedNavigationJump || IsNavigationText(*conductor->second);
                 }
             }
+            if (navigation
+                && !AddMeasureNavigation(*navigation, partMeasure, *partStaves, staffBindings,
+                    effectiveMeter ? IntAt(*effectiveMeter, "beatType", 4) : InitialBeatType(part),
+                    !hasRenderedNavigationJump, measure))
+                return false;
         }
         if (repeatStart) measure->SetLeft(BARRENDITION_rptstart);
         if (repeatEnd) measure->SetRight(BARRENDITION_rptend);
+        if (!rightBarline.empty() && !repeatEnd) {
+            if (rightBarline == "regular")
+                measure->SetRight(BARRENDITION_single);
+            else if (rightBarline == "dotted")
+                measure->SetRight(BARRENDITION_dotted);
+            else if (rightBarline == "dashed")
+                measure->SetRight(BARRENDITION_dashed);
+            else if (rightBarline == "heavy")
+                measure->SetRight(BARRENDITION_heavy);
+            else if (rightBarline == "light-light")
+                measure->SetRight(BARRENDITION_dbl);
+            else if (rightBarline == "light-heavy")
+                measure->SetRight(BARRENDITION_end);
+            else if (rightBarline == "heavy-heavy")
+                measure->SetRight(BARRENDITION_dblheavy);
+            else if (rightBarline == "none")
+                measure->SetRight(BARRENDITION_invis);
+            else if (rightBarline == "short" || rightBarline == "tick") {
+                measure->SetRight(BARRENDITION_single);
+                measure->SetBarLen(4);
+                measure->SetBarPlace(rightBarline == "short" ? 2 : 6);
+            }
+        }
+        if (primaryNavigation && BoolAt(*primaryNavigation, "endingStop", false)) activeEnding = nullptr;
     }
 
     for (const PendingSpanner &pending : pendingSpanners) {
@@ -2558,7 +2917,21 @@ bool JsmInput::Import(const std::string &data)
                 delete octave;
                 return Fail("JSM_UNSUPPORTED_SPANNER", pending.path + "/properties/direction", direction);
             }
-            octave->SetN(std::to_string(IntAt(*pending.source, "number", 1)));
+            const int octaveDelta = (direction == "up" ? 1 : -1) * ((size - 1) / 7);
+            for (const auto &[sourceId, targetId] : eventTargets) {
+                const auto timing = eventTimes.find(sourceId);
+                if (timing == eventTimes.end()) continue;
+                const auto [barIndex, timestamp] = timing->second;
+                const bool beforeStart = barIndex < startEndpoint.barIndex
+                    || (barIndex == startEndpoint.barIndex && timestamp < startEndpoint.timestamp);
+                const bool afterEnd = barIndex > endEndpoint.barIndex
+                    || (barIndex == endEndpoint.barIndex && timestamp > endEndpoint.timestamp);
+                if (beforeStart || afterEnd) continue;
+                Note *note = dynamic_cast<Note *>(m_doc->FindDescendantByID(targetId));
+                if (!note || !note->HasOct()) continue;
+                note->SetOctGes(note->GetOct());
+                note->SetOct(note->GetOct() + octaveDelta);
+            }
             octave->SetStaff({ pending.staffNumber });
             spanner = octave;
         }
