@@ -7,7 +7,7 @@
  * Module: Decode canonical JSM into Verovio's native score model.
  * Correctness: Native JSM and its MusicXML projection engrave identically for supported notation fixtures.
  * Last revised: 2026-07-10
- * Last changed: Added native rendering of preserved MusicXML page credits.
+ * Last changed: Added native event engraving for beams, tuplets, grace notes, stems, noteheads, and unpitched notes.
  */
 
 #include "iojsm.h"
@@ -26,6 +26,7 @@
 
 #include "accid.h"
 #include "artic.h"
+#include "beam.h"
 #include "chord.h"
 #include "clef.h"
 #include "doc.h"
@@ -61,6 +62,7 @@
 #include "tempo.h"
 #include "text.h"
 #include "tie.h"
+#include "tuplet.h"
 #include "vrv.h"
 
 namespace vrv {
@@ -291,7 +293,8 @@ bool AddArticulations(Object *event, const JObject &source, Measure *measure, co
     return true;
 }
 
-bool SetDuration(DurationInterface *duration, const JObject &event, const std::string &path)
+bool SetDuration(
+    DurationInterface *duration, const JObject &event, const std::string &path, bool tupletMember = false)
 {
     std::string noteType;
     data_DURATION value = DURATION_NONE;
@@ -338,9 +341,11 @@ bool SetDuration(DurationInterface *duration, const JObject &event, const std::s
     if (quarterValue != quarterValues.end()) {
         long double dotFactor = 1.0L;
         for (int i = 0; i < dots; ++i) dotFactor += 1.0L / std::pow(2.0L, i + 1);
-        if (std::abs(encodedDuration - quarterValue->second * dotFactor) > 1e-12L) {
+        const bool grace = ObjectAt(event, "grace", path, false) != nullptr;
+        if (!grace && !tupletMember
+            && std::abs(encodedDuration - quarterValue->second * dotFactor) > 1e-12L) {
             return Fail("JSM_DURATION_MISMATCH", path + "/duration",
-                "rational duration does not match noteType and dots; tuplets are not yet supported");
+                "rational duration does not match noteType and dots outside a tuplet");
         }
     }
     return true;
@@ -350,20 +355,77 @@ bool AddTone(Note *note, const JObject &tone, std::map<std::string, int> &accide
     const std::string &path)
 {
     const JObject *pitch = ObjectAt(tone, "pitch", path);
-    if (!pitch || !AddPitch(note, *pitch, tone, accidentalState, fifths, path + "/pitch")) return false;
+    if (!pitch) return false;
+    const std::string kind = pitch->get<jsonxx::String>("kind", "");
+    if (kind == "unpitched") {
+        std::string step;
+        if (!StringAt(*pitch, "displayStep", path + "/pitch", step)) return false;
+        const data_PITCHNAME pname = PitchName(step);
+        const int octave = IntAt(*pitch, "displayOctave", -100);
+        if (pname == PITCHNAME_NONE || octave < 0 || octave > 9) {
+            return Fail("JSM_INVALID_UNPITCHED", path + "/pitch", "invalid display pitch");
+        }
+        note->SetLoc(note->CalcLoc(pname, octave, -2));
+    }
+    else if (!AddPitch(note, *pitch, tone, accidentalState, fifths, path + "/pitch")) {
+        return false;
+    }
     if (tone.has<jsonxx::String>("notehead")) {
-        static const std::map<std::string, data_HEADSHAPE_list> noteheads = { { "circle", HEADSHAPE_list_circle },
+        static const std::map<std::string, data_HEADSHAPE_list> noteheads = { { "normal", HEADSHAPE_list_NONE },
             { "cross", HEADSHAPE_list_plus }, { "diamond", HEADSHAPE_list_diamond },
             { "triangle", HEADSHAPE_list_rtriangle }, { "slash", HEADSHAPE_list_slash },
-            { "square", HEADSHAPE_list_square }, { "x", HEADSHAPE_list_x } };
+            { "square", HEADSHAPE_list_square }, { "x-circle", HEADSHAPE_list_slash },
+            { "none", HEADSHAPE_list_NONE } };
         const std::string value = tone.get<jsonxx::String>("notehead");
         auto iter = noteheads.find(value);
         if (iter == noteheads.end()) return Fail("JSM_UNSUPPORTED_NOTEHEAD", path + "/notehead", value);
-        data_HEADSHAPE shape;
-        shape.SetHeadShapeList(iter->second);
-        note->SetHeadShape(shape);
+        if (iter->second != HEADSHAPE_list_NONE) {
+            data_HEADSHAPE shape;
+            shape.SetHeadShapeList(iter->second);
+            note->SetHeadShape(shape);
+        }
+        if (value == "none") note->SetHeadVisible(BOOLEAN_false);
     }
     return true;
+}
+
+template <typename T> bool SetEventAppearance(T *element, const JObject &event, const std::string &path)
+{
+    if (event.has<jsonxx::String>("stem")) {
+        const std::string value = event.get<jsonxx::String>("stem");
+        if (value == "up") element->SetStemDir(STEMDIRECTION_up);
+        else if (value == "down") element->SetStemDir(STEMDIRECTION_down);
+        else if (value == "none") element->SetStemVisible(BOOLEAN_false);
+        else if (value != "auto") return Fail("JSM_INVALID_STEM", path + "/stem", value);
+    }
+    const JObject *grace = ObjectAt(event, "grace", path, false);
+    if (grace) {
+        const bool slash = BoolAt(*grace, "slash", false);
+        element->SetGrace(slash ? GRACE_unacc : GRACE_acc);
+        if (slash) element->SetStemMod(STEMMODIFIER_1slash);
+    }
+    return true;
+}
+
+std::string SpannerEventId(const JObject &spanner, const std::string &endpoint)
+{
+    const JObject *source = ObjectAt(spanner, endpoint, "/score/parts/measures/spanners", false);
+    if (!source || source->get<jsonxx::String>("kind", "") != "event") return {};
+    return source->get<jsonxx::String>("eventId", "");
+}
+
+const JObject *TupletStartingAt(const JObject &measure, const std::string &eventId)
+{
+    const JArray *spanners = ArrayAt(measure, "spanners", "/score/parts/measures", false);
+    if (!spanners) return nullptr;
+    for (unsigned int i = 0; i < spanners->size(); ++i) {
+        if (!spanners->has<JObject>(i)) continue;
+        const JObject &spanner = spanners->get<JObject>(i);
+        if (spanner.get<jsonxx::String>("kind", "") == "tuplet"
+            && SpannerEventId(spanner, "start") == eventId)
+            return &spanner;
+    }
+    return nullptr;
 }
 
 bool IsCue(const JObject &event)
@@ -1846,6 +1908,9 @@ bool JsmInput::Import(const std::string &data)
                     const JArray *events = ArrayAt(voice, "events", "/score/parts/measures/staves/voices");
                     if (!events) return false;
                     long double expectedOnset = 0.0L;
+                    Tuplet *activeTuplet = nullptr;
+                    std::string tupletEndId;
+                    Beam *activeBeam = nullptr;
                     for (unsigned int eventIndex = 0; eventIndex < events->size(); ++eventIndex) {
                         const std::string eventPath = "/score/parts/" + std::to_string(partIndex) + "/measures/"
                             + std::to_string(barIndex) + "/staves/" + std::to_string(staffIndex) + "/voices/"
@@ -1869,6 +1934,32 @@ bool JsmInput::Import(const std::string &data)
                         if (!StringAt(event, "type", eventPath, type)
                             || !StringAt(event, "id", eventPath, eventId))
                             return false;
+                        const JObject *tupletSpanner = TupletStartingAt(partMeasure, eventId);
+                        if (tupletSpanner) {
+                            if (activeTuplet) {
+                                return Fail("JSM_UNSUPPORTED_NESTED_TUPLET", eventPath,
+                                    "nested tuplets are not yet supported");
+                            }
+                            const JObject *spec = ObjectAt(*tupletSpanner, "tuplet", eventPath);
+                            if (!spec) return false;
+                            const int actual = IntAt(*spec, "actualNotes", 0);
+                            const int normal = IntAt(*spec, "normalNotes", 0);
+                            if (actual < 1 || normal < 1) {
+                                return Fail("JSM_INVALID_TUPLET", eventPath, "positive ratio required");
+                            }
+                            activeTuplet = new Tuplet();
+                            activeTuplet->SetNum(actual);
+                            activeTuplet->SetNumbase(normal);
+                            activeTuplet->SetBracketVisible(
+                                BoolAt(*spec, "bracket", false) ? BOOLEAN_true : BOOLEAN_false);
+                            const std::string showNumber = spec->get<jsonxx::String>("showNumber", "actual");
+                            if (showNumber == "none") activeTuplet->SetNumVisible(BOOLEAN_false);
+                            else if (showNumber == "both") activeTuplet->SetNumFormat(tupletVis_NUMFORMAT_ratio);
+                            else activeTuplet->SetNumFormat(tupletVis_NUMFORMAT_count);
+                            activeTuplet->SetID(tupletSpanner->get<jsonxx::String>("id", ""));
+                            layer->AddChild(activeTuplet);
+                            tupletEndId = SpannerEventId(*tupletSpanner, "end");
+                        }
                         Object *element = nullptr;
                         if (type == "note") {
                             const JObject *tone = ObjectAt(event, "tone", eventPath);
@@ -1880,9 +1971,10 @@ bool JsmInput::Import(const std::string &data)
                             if (IsCue(event)) note->SetCue(BOOLEAN_true);
                             note->m_unsupported.push_back({ "jsm-event-id", eventId });
                             note->m_unsupported.push_back({ "jsm-tone-id", toneId });
-                            if (!SetDuration(note, event, eventPath)
+                            if (!SetDuration(note, event, eventPath, activeTuplet != nullptr)
                                 || !AddTone(
-                                    note, *tone, accidentalState, binding->second.fifths, eventPath + "/tone")) {
+                                    note, *tone, accidentalState, binding->second.fifths, eventPath + "/tone")
+                                || !SetEventAppearance(note, event, eventPath)) {
                                 delete note;
                                 return false;
                             }
@@ -1899,7 +1991,8 @@ bool JsmInput::Import(const std::string &data)
                             chord->SetID(eventId);
                             if (IsCue(event)) chord->SetCue(BOOLEAN_true);
                             chord->m_unsupported.push_back({ "jsm-event-id", eventId });
-                            if (!SetDuration(chord, event, eventPath)) {
+                            if (!SetDuration(chord, event, eventPath, activeTuplet != nullptr)
+                                || !SetEventAppearance(chord, event, eventPath)) {
                                 delete chord;
                                 return false;
                             }
@@ -1946,7 +2039,7 @@ bool JsmInput::Import(const std::string &data)
                                 element = rest;
                             }
                             element->m_unsupported.push_back({ "jsm-event-id", eventId });
-                            if (duration && !SetDuration(duration, event, eventPath)) {
+                            if (duration && !SetDuration(duration, event, eventPath, activeTuplet != nullptr)) {
                                 delete element;
                                 return false;
                             }
@@ -1956,7 +2049,7 @@ bool JsmInput::Import(const std::string &data)
                             Space *space = new Space();
                             space->SetID(eventId);
                             space->m_unsupported.push_back({ "jsm-event-id", eventId });
-                            if (!SetDuration(space, event, eventPath)) {
+                            if (!SetDuration(space, event, eventPath, activeTuplet != nullptr)) {
                                 delete space;
                                 return false;
                             }
@@ -1970,8 +2063,38 @@ bool JsmInput::Import(const std::string &data)
                             delete element;
                             return false;
                         }
-                        layer->AddChild(element);
+                        const JArray *beams = ArrayAt(event, "beams", eventPath, false);
+                        std::string primaryBeam;
+                        if (beams && !beams->empty() && beams->has<JObject>(0)) {
+                            primaryBeam = beams->get<JObject>(0).get<jsonxx::String>("value", "");
+                        }
+                        Object *eventParent = activeTuplet ? static_cast<Object *>(activeTuplet)
+                                                          : static_cast<Object *>(layer);
+                        if (primaryBeam == "begin") {
+                            if (activeBeam) {
+                                delete element;
+                                return Fail("JSM_INVALID_BEAM", eventPath + "/beams", "nested beam begin");
+                            }
+                            activeBeam = new Beam();
+                            eventParent->AddChild(activeBeam);
+                        }
+                        else if ((primaryBeam == "continue" || primaryBeam == "end") && !activeBeam) {
+                            delete element;
+                            return Fail("JSM_INVALID_BEAM", eventPath + "/beams", "beam continuation without begin");
+                        }
+                        if (activeBeam) eventParent = activeBeam;
+                        eventParent->AddChild(element);
+                        if (primaryBeam == "end") activeBeam = nullptr;
+                        if (eventId == tupletEndId) {
+                            if (activeBeam) {
+                                return Fail("JSM_INVALID_TUPLET", eventPath, "tuplet ends inside an open beam");
+                            }
+                            activeTuplet = nullptr;
+                            tupletEndId.clear();
+                        }
                     }
+                    if (activeBeam) return Fail("JSM_INVALID_BEAM", "/score/parts/measures", "unterminated beam");
+                    if (activeTuplet) return Fail("JSM_INVALID_TUPLET", "/score/parts/measures", "unterminated tuplet");
                     long double measureDuration = 0.0L;
                     if (!RationalAt(partMeasure, "duration", "/score/parts/measures", measureDuration)) return false;
                     if (std::abs(expectedOnset - measureDuration) > 1e-12L) {
@@ -2031,6 +2154,9 @@ bool JsmInput::Import(const std::string &data)
         if (!StringAt(*pending.source, "id", pending.path, id)
             || !StringAt(*pending.source, "kind", pending.path, kind))
             return false;
+        // Tuplets are layer containers and were materialized while their
+        // member events were added above, rather than as control elements.
+        if (kind == "tuplet") continue;
         const JObject *start = ObjectAt(*pending.source, "start", pending.path);
         const JObject *end = ObjectAt(*pending.source, "end", pending.path);
         if (!start || !end) return false;

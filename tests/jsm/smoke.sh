@@ -123,4 +123,15 @@ if "$verovio" -r "$repo/data" -f jsm -o "$tmp/amplification.svg" "$tmp/compact-a
 fi
 rg -q 'JSM_RESOURCE_LIMIT' "$tmp/amplification.log"
 
-echo "JSM smoke passed: canonical/compact parity, unsafe IDs, duplicate IDs, and compact reference validation"
+for event_fixture in grace tuplet beam percussion; do
+    "$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/event-$event_fixture.mei" \
+        "$repo/tests/jsm/event-$event_fixture.jsm"
+done
+rg -q '<note[^>]*grace="unacc"[^>]*stem.mod="1slash"' "$tmp/event-grace.mei"
+rg -q '<tuplet[^>]*num="3"[^>]*numbase="2"[^>]*bracket.visible="true"' "$tmp/event-tuplet.mei"
+rg -q '<beam([ >])' "$tmp/event-beam.mei"
+rg -q '<note[^>]*loc="' "$tmp/event-percussion.mei"
+rg -q '<note[^>]*stem.dir="up"' "$tmp/event-percussion.mei"
+rg -q '<note[^>]*stem.dir="down"' "$tmp/event-percussion.mei"
+
+echo "JSM smoke passed: compact validation, contexts, credits, and native event engraving"
