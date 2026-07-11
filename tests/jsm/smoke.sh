@@ -65,6 +65,15 @@ jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].articulations = ["
 "$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/falloff.mei" "$tmp/falloff.jsm"
 rg -q '<artic[^>]*artic="fall"' "$tmp/falloff.mei"
 
+jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].articulations = ["breath-mark"]' \
+    "$fixture" >"$tmp/breath-mark.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/breath-mark.mei" "$tmp/breath-mark.jsm"
+rg -q '<breath[^>]*startid="#event-b-flat-1"' "$tmp/breath-mark.mei"
+if rg -q '<artic' "$tmp/breath-mark.mei"; then
+    echo "breath-mark rendered as a generic articulation" >&2
+    exit 1
+fi
+
 echo "JSM native smoke passed: stable IDs present; written accidentals=$written_accidentals"
 
 jq '.score.conductorTrack.measures[0].events = [{

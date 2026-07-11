@@ -27,6 +27,7 @@
 #include "accid.h"
 #include "artic.h"
 #include "beam.h"
+#include "breath.h"
 #include "chord.h"
 #include "clef.h"
 #include "doc.h"
@@ -295,6 +296,12 @@ namespace {
                 fermata->SetStartid("#" + event->GetID());
                 fermata->m_unsupported.push_back({ "jsm-event-id", event->GetID() });
                 measure->AddChild(fermata);
+                continue;
+            }
+            if (name == "breath-mark") {
+                Breath *breath = new Breath();
+                breath->SetStartid("#" + event->GetID());
+                measure->AddChild(breath);
                 continue;
             }
             if (event->Is(REST) || event->Is(MREST)) {
