@@ -7,7 +7,7 @@
  * Module: Decode canonical JSM into Verovio's native score model.
  * Correctness: Native JSM and its MusicXML projection engrave identically for supported notation fixtures.
  * Last revised: 2026-07-10
- * Last changed: Added native event engraving for beams, tuplets, grace notes, stems, noteheads, and unpitched notes.
+ * Last changed: Added strict native key-signature cancellation engraving.
  */
 
 #include "iojsm.h"
@@ -840,6 +840,18 @@ bool AddKeySig(Object *parent, const JObject &key, const std::string &path)
     if (fifths < -7 || fifths > 7) return Fail("JSM_UNSUPPORTED_KEY", path + "/fifths", "expected -7 through 7");
     KeySig *keySig = new KeySig();
     keySig->SetSig({ std::abs(fifths), fifths < 0 ? ACCIDENTAL_WRITTEN_f : ACCIDENTAL_WRITTEN_s });
+    if (key.kv_map().contains("cancel")) {
+        int cancel = 0;
+        if (!IntegerAt(key, "cancel", path, cancel)) {
+            delete keySig;
+            return false;
+        }
+        if (cancel < -7 || cancel > 7) {
+            delete keySig;
+            return Fail("JSM_UNSUPPORTED_KEY", path + "/cancel", "expected -7 through 7");
+        }
+        keySig->SetCancelaccid(CANCELACCID_before);
+    }
     if (key.has<jsonxx::String>("mode")) {
         const std::string mode = key.get<jsonxx::String>("mode");
         const data_MODE parsedMode = keySig->AttKeySigAnl::StrToMode(mode, false);
@@ -1767,6 +1779,7 @@ bool JsmInput::Import(const std::string &data)
             }
 
             StaffGrp *changedStaffGrp = nullptr;
+            bool hasGlobalKeyChange = false;
             for (const ChangedStaff &change : changedStaves) {
                 const JObject *oldKey
                     = change.oldContext ? ObjectAt(*change.oldContext, "key", "/score/parts/contexts", false) : nullptr;
@@ -1790,7 +1803,14 @@ bool JsmInput::Import(const std::string &data)
                     != (newKey ? JsonValue(jsonxx::Value(*newKey)) : std::string());
                 const bool clefChanged = (oldClef ? JsonValue(jsonxx::Value(*oldClef)) : std::string())
                     != (newClef ? JsonValue(jsonxx::Value(*newClef)) : std::string());
-                if (keyChanged || clefChanged) {
+                const bool globalKeyChange = keyChanged && (staffBindings.size() == 1);
+                if (globalKeyChange && newKey
+                    && !AddKeySig(contextChange, *newKey, "/score/parts/contexts/key")) {
+                    delete contextChange;
+                    return false;
+                }
+                hasGlobalKeyChange = hasGlobalKeyChange || globalKeyChange;
+                if ((keyChanged && !globalKeyChange) || clefChanged) {
                     if (!changedStaffGrp) {
                         changedStaffGrp = new StaffGrp();
                         contextChange->AddChild(changedStaffGrp);
@@ -1802,14 +1822,15 @@ bool JsmInput::Import(const std::string &data)
                         delete contextChange;
                         return false;
                     }
-                    if (keyChanged && newKey && !AddKeySig(staffDef, *newKey, "/score/parts/contexts/key")) {
+                    if (keyChanged && !globalKeyChange && newKey
+                        && !AddKeySig(staffDef, *newKey, "/score/parts/contexts/key")) {
                         delete contextChange;
                         return false;
                     }
                     changedStaffGrp->AddChild(staffDef);
                 }
             }
-            if (meterChanged || changedStaffGrp) section->AddChild(contextChange);
+            if (meterChanged || changedStaffGrp || hasGlobalKeyChange) section->AddChild(contextChange);
             else delete contextChange;
         }
         activeMeter = effectiveMeterJson;

@@ -51,6 +51,25 @@ jq '.score.parts[0] as $source
 rg -U -q '<scoreDef[^>]*>[[:space:]]*<staffGrp[^>]*>[[:space:]]*<staffDef[^>]*n="2"[^>]*>[[:space:]]*<keySig[^>]*sig="0"' \
     "$tmp/multipart-context.mei"
 
+jq '.score.parts[0] as $part
+    | ($part.contexts[0]
+        | .id = "context-cancelled"
+        | .contentHash = ("c" * 64)
+        | .key = {fifths: 0, mode: "major", cancel: -2}) as $cancelled
+    | .score.parts[0].contexts += [$cancelled]
+    | .score.parts[0].measures[1].contextRef = $cancelled.id' "$fixture" >"$tmp/key-cancellation.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/key-cancellation.mei" "$tmp/key-cancellation.jsm"
+rg -q '<keySig[^>]*sig="0"[^>]*cancelaccid="before"' "$tmp/key-cancellation.mei"
+
+for invalid_cancel in 8 '"invalid"'; do
+    jq ".score.parts[0].contexts[0].key.cancel = $invalid_cancel" "$fixture" >"$tmp/invalid-cancel.jsm"
+    if "$verovio" -r "$repo/data" -f jsm -o "$tmp/invalid-cancel.svg" "$tmp/invalid-cancel.jsm" \
+        >"$tmp/invalid-cancel.log" 2>&1; then
+        echo "invalid key cancellation was accepted: $invalid_cancel" >&2
+        exit 1
+    fi
+done
+
 jq '(.score.parts[1].contexts[] | select(.id == "second-context-c-major") | .time) =
     {beats: [3], beatType: 8}' "$tmp/multipart-context.jsm" >"$tmp/conflicting-meter.jsm"
 if "$verovio" -r "$repo/data" -f jsm -o "$tmp/conflicting-meter.svg" "$tmp/conflicting-meter.jsm" \
