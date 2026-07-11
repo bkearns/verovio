@@ -59,6 +59,11 @@ jq '.score.parts[0].measures[0].navigation = {"rightBarline": "dashed"}' \
 "$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/dashed-barline.mei" "$tmp/dashed-barline.jsm"
 rg -q '<measure[^>]*right="dashed"' "$tmp/dashed-barline.mei"
 
+jq '.score.parts[0].measures[0].navigation = {"rightBarline": "light-heavy", "repeatEnd": 2}' \
+    "$fixture" >"$tmp/repeat-barline.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/repeat-barline.mei" "$tmp/repeat-barline.jsm"
+rg -q '<measure[^>]*right="rptend"' "$tmp/repeat-barline.mei"
+
 jq '.score.parts[0].measures[0].navigation = {"endingStart": [1], "endingStop": true}' \
     "$fixture" >"$tmp/ending.jsm"
 "$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/ending.mei" "$tmp/ending.jsm"

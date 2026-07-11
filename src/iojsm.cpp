@@ -2733,7 +2733,7 @@ bool JsmInput::Import(const std::string &data)
         }
         if (repeatStart) measure->SetLeft(BARRENDITION_rptstart);
         if (repeatEnd) measure->SetRight(BARRENDITION_rptend);
-        if (!rightBarline.empty()) {
+        if (!rightBarline.empty() && !repeatEnd) {
             if (rightBarline == "regular")
                 measure->SetRight(BARRENDITION_single);
             else if (rightBarline == "dotted")
