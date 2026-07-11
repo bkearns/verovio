@@ -148,8 +148,35 @@ rg -q 'JSM_UNSUPPORTED_ORNAMENT.*ornaments/0.*shake' "$tmp/unsupported-ornament.
 echo "JSM native smoke passed: stable IDs present; written accidentals=$written_accidentals"
 
 jq '.score.conductorTrack.measures[0].events = [{
-        id:"tempo-quarter-96", onset:[0,1], duration:[0,1], order:0, kind:"tempo",
+        id:"tempo-text-playback", onset:[0,1], duration:[0,1], order:0, kind:"tempo", value:"Allegro",
         tempo:{beatUnit:"quarter", bpm:[96,1], transition:"immediate"}
+    }]
+    | .score.parts[0].measures[0].conductorEventRefs = ["tempo-text-playback"]
+    | .score.parts[0].measures[0].measureEvents += [{
+        type:"directionRef", id:"tempo-text-playback-ref", onset:[0,1], duration:[0,1], order:0,
+        conductorEventRef:"tempo-text-playback", staffId:"staff-1", placement:"above"
+    }]' "$fixture" >"$tmp/tempo-text-playback.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/tempo-text-playback.mei" "$tmp/tempo-text-playback.jsm"
+python3 - "$tmp/tempo-text-playback.mei" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+tempo = next(element for element in root.iter() if element.tag.rsplit("}", 1)[-1] == "tempo")
+if "".join(tempo.itertext()) != "Allegro":
+    raise SystemExit("expected playback-only tempo to render only its tempo text")
+if tempo.attrib.get("midi.bpm") != "96":
+    raise SystemExit("expected playback-only tempo midi.bpm 96")
+if "mm" in tempo.attrib or "mm.unit" in tempo.attrib:
+    raise SystemExit("playback-only tempo emitted engraved metronome attributes")
+if any(element.tag.rsplit("}", 1)[-1] == "rend" for element in tempo.iter()):
+    raise SystemExit("playback-only tempo emitted a SMuFL metronome rendition")
+PY
+
+jq '.score.conductorTrack.measures[0].events = [{
+        id:"tempo-quarter-96", onset:[0,1], duration:[0,1], order:0, kind:"tempo",
+        tempo:{beatUnit:"quarter", bpm:[96,1], transition:"immediate"},
+        metronome:{left:{beatUnit:"quarter"}, perMinute:"96"}
     }]
     | .score.parts[0].measures[0].conductorEventRefs = ["tempo-quarter-96"]
     | .score.parts[0].measures[0].measureEvents += [{

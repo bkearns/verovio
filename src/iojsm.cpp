@@ -946,8 +946,7 @@ namespace {
         const double timestamp = 1.0 + (onset ? RationalValue(*onset) * beatType / 4.0 : 0.0);
         const std::vector<int> staffNumbers{ binding->second.number };
         ControlElement *control = nullptr;
-        const JObject *metronome
-            = kind == "direction" ? ObjectAt(conductor, "metronome", "/score/conductorTrack/events", false) : nullptr;
+        const JObject *metronome = ObjectAt(conductor, "metronome", "/score/conductorTrack/events", false);
 
         // MusicXML projects global tempo and rehearsal events only on the first
         // referring staff, while dynamics remain part-local.
@@ -967,7 +966,7 @@ namespace {
             const JObject *tempoSource = ObjectAt(conductor, "tempo", "/score/conductorTrack/events", false);
             const JArray *bpm
                 = tempoSource ? ArrayAt(*tempoSource, "bpm", "/score/conductorTrack/events/tempo", false) : nullptr;
-            if (tempoSource && tempoSource->has<jsonxx::String>("beatUnit")) {
+            if (metronome && tempoSource && tempoSource->has<jsonxx::String>("beatUnit")) {
                 const std::string beatUnit = tempoSource->get<jsonxx::String>("beatUnit");
                 tempo->SetMmUnit(DurationFromType(beatUnit));
                 Rend *rend = new Rend();
@@ -980,15 +979,17 @@ namespace {
             if (bpm) {
                 const double value = RationalValue(*bpm);
                 tempo->SetMidiBpm(value);
-                tempo->SetMm(value);
-                Text *separator = new Text();
-                separator->SetText(UTF8to32(" = "));
-                tempo->AddChild(separator);
-                std::ostringstream bpmText;
-                bpmText << value;
-                Text *text = new Text();
-                text->SetText(UTF8to32(bpmText.str()));
-                tempo->AddChild(text);
+                if (metronome) {
+                    tempo->SetMm(value);
+                    Text *separator = new Text();
+                    separator->SetText(UTF8to32(" = "));
+                    tempo->AddChild(separator);
+                    std::ostringstream bpmText;
+                    bpmText << value;
+                    Text *text = new Text();
+                    text->SetText(UTF8to32(bpmText.str()));
+                    tempo->AddChild(text);
+                }
             }
             control = tempo;
             renderedOnce.insert(conductorId);
