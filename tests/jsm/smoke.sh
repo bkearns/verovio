@@ -49,6 +49,21 @@ if rg -q '<octave[^>]* n=' "$tmp/octave-shift.mei"; then
     exit 1
 fi
 
+"$verovio" -r "$repo/data" -f musicxml -t mei -o "$tmp/mid-measure-context.mei" \
+    "$repo/tests/jsm/mid-measure-context.musicxml"
+rg -U -q '<note[^>]*xml:id="n1"[\s\S]*<note[^>]*xml:id="n2"[\s\S]*<keySig[^>]*sig="2s"[\s\S]*<note[^>]*xml:id="n3"' \
+    "$tmp/mid-measure-context.mei"
+
+jq '.score.parts[0].measures[0].navigation = {"rightBarline": "dashed"}' \
+    "$fixture" >"$tmp/dashed-barline.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/dashed-barline.mei" "$tmp/dashed-barline.jsm"
+rg -q '<measure[^>]*right="dashed"' "$tmp/dashed-barline.mei"
+
+jq '.score.parts[0].measures[0].navigation = {"endingStart": [1], "endingStop": true}' \
+    "$fixture" >"$tmp/ending.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/ending.mei" "$tmp/ending.jsm"
+rg -U -q '<ending[^>]*n="1"[\s\S]*<measure' "$tmp/ending.mei"
+
 jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].articulations = ["strong-accent"]' \
     "$fixture" >"$tmp/strong-accent.jsm"
 "$verovio" -r "$repo/data" -f jsm -o "$tmp/strong-accent.svg" "$tmp/strong-accent.jsm"

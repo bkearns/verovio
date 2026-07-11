@@ -34,6 +34,7 @@
 #include "dir.h"
 #include "doc.h"
 #include "dynam.h"
+#include "ending.h"
 #include "fermata.h"
 #include "gliss.h"
 #include "grpsym.h"
@@ -49,6 +50,7 @@
 #include "metersig.h"
 #include "mordent.h"
 #include "mrest.h"
+#include "multirest.h"
 #include "note.h"
 #include "octave.h"
 #include "pb.h"
@@ -2046,12 +2048,46 @@ bool JsmInput::Import(const std::string &data)
                 "JSM_CONFLICTING_METERS", "/score/parts/contexts/time", "all parts must use the same initial meter");
         }
     }
+    unsigned int skipMultiRestUntil = 0;
+    Ending *activeEnding = nullptr;
     for (unsigned int barIndex = 0; barIndex < bars->size(); ++barIndex) {
+        if (barIndex < skipMultiRestUntil) continue;
         const std::string barPath = "/score/logicalBars/" + std::to_string(barIndex);
         if (!bars->has<JObject>(barIndex)) return Fail("JSM_INVALID_BAR", barPath, "expected object");
         const JObject &bar = bars->get<JObject>(barIndex);
         std::string barId;
         if (!StringAt(bar, "id", barPath, barId)) return false;
+        int multiRestCount = 0;
+        if (parts->has<JObject>(0)) {
+            const JArray *measures = ArrayAt(parts->get<JObject>(0), "measures", "/score/parts/0", false);
+            if (measures && measures->has<JObject>(barIndex)) {
+                const JObject *presentation
+                    = ObjectAt(measures->get<JObject>(barIndex), "presentation", "/score/parts/0/measures", false);
+                const JObject *multiRest
+                    = presentation ? ObjectAt(*presentation, "multiRest", "/presentation", false) : nullptr;
+                multiRestCount = multiRest ? IntAt(*multiRest, "count", 0) : 0;
+            }
+        }
+        if (multiRestCount > 0) skipMultiRestUntil = barIndex + static_cast<unsigned int>(multiRestCount);
+        const JObject *primaryNavigation = nullptr;
+        if (parts->has<JObject>(0)) {
+            const JArray *measures = ArrayAt(parts->get<JObject>(0), "measures", "/score/parts/0", false);
+            if (measures && measures->has<JObject>(barIndex)) {
+                primaryNavigation
+                    = ObjectAt(measures->get<JObject>(barIndex), "navigation", "/score/parts/0/measures", false);
+            }
+        }
+        if (primaryNavigation && primaryNavigation->has<JArray>("endingStart")) {
+            const JArray &numbers = primaryNavigation->get<JArray>("endingStart");
+            std::ostringstream value;
+            for (unsigned int i = 0; i < numbers.size(); ++i) {
+                if (i > 0) value << ",";
+                value << (numbers.has<jsonxx::Number>(i) ? static_cast<int>(numbers.get<jsonxx::Number>(i)) : 0);
+            }
+            activeEnding = new Ending();
+            activeEnding->SetN(value.str());
+            section->AddChild(activeEnding);
+        }
         const bool newPage = HasPresentationBreak(*parts, barIndex, "newPage");
         const bool newSystem = HasPresentationBreak(*parts, barIndex, "newSystem");
         if (newPage) section->AddChild(new Pb());
@@ -2199,10 +2235,14 @@ bool JsmInput::Import(const std::string &data)
         measure->SetID(primaryMeasureId);
         measure->m_unsupported.push_back({ "jsm-bar-id", barId });
         measure->SetN(bar.get<jsonxx::String>("number", std::to_string(barIndex + 1)));
-        section->AddChild(measure);
+        if (activeEnding)
+            activeEnding->AddChild(measure);
+        else
+            section->AddChild(measure);
 
         bool repeatStart = false;
         bool repeatEnd = false;
+        std::string rightBarline;
         for (unsigned int partIndex = 0; partIndex < parts->size(); ++partIndex) {
             const JObject &part = parts->get<JObject>(partIndex);
             const JArray *partMeasures = ArrayAt(part, "measures", "/score/parts/" + std::to_string(partIndex));
@@ -2224,6 +2264,9 @@ bool JsmInput::Import(const std::string &data)
             if (navigation) {
                 repeatStart = repeatStart || BoolAt(*navigation, "repeatStart", false);
                 repeatEnd = repeatEnd || navigation->has<jsonxx::Number>("repeatEnd");
+                if (navigation->has<jsonxx::String>("rightBarline")) {
+                    rightBarline = navigation->get<jsonxx::String>("rightBarline");
+                }
             }
             const JArray *measureStaves = ArrayAt(partMeasure, "staves", "/score/parts/measures");
             if (!measureStaves) return false;
@@ -2412,6 +2455,12 @@ bool JsmInput::Import(const std::string &data)
                     };
                     const JArray *events = ArrayAt(voice, "events", "/score/parts/measures/staves/voices");
                     if (!events) return false;
+                    if (multiRestCount > 0) {
+                        MultiRest *multiRest = new MultiRest();
+                        multiRest->SetNum(multiRestCount);
+                        layer->AddChild(multiRest);
+                        continue;
+                    }
                     long double expectedOnset = 0.0L;
                     Tuplet *activeTuplet = nullptr;
                     std::string tupletEndId;
@@ -2684,6 +2733,30 @@ bool JsmInput::Import(const std::string &data)
         }
         if (repeatStart) measure->SetLeft(BARRENDITION_rptstart);
         if (repeatEnd) measure->SetRight(BARRENDITION_rptend);
+        if (!rightBarline.empty()) {
+            if (rightBarline == "regular")
+                measure->SetRight(BARRENDITION_single);
+            else if (rightBarline == "dotted")
+                measure->SetRight(BARRENDITION_dotted);
+            else if (rightBarline == "dashed")
+                measure->SetRight(BARRENDITION_dashed);
+            else if (rightBarline == "heavy")
+                measure->SetRight(BARRENDITION_heavy);
+            else if (rightBarline == "light-light")
+                measure->SetRight(BARRENDITION_dbl);
+            else if (rightBarline == "light-heavy")
+                measure->SetRight(BARRENDITION_end);
+            else if (rightBarline == "heavy-heavy")
+                measure->SetRight(BARRENDITION_dblheavy);
+            else if (rightBarline == "none")
+                measure->SetRight(BARRENDITION_invis);
+            else if (rightBarline == "short" || rightBarline == "tick") {
+                measure->SetRight(BARRENDITION_single);
+                measure->SetBarLen(4);
+                measure->SetBarPlace(rightBarline == "short" ? 2 : 6);
+            }
+        }
+        if (primaryNavigation && BoolAt(*primaryNavigation, "endingStop", false)) activeEnding = nullptr;
     }
 
     for (const PendingSpanner &pending : pendingSpanners) {
