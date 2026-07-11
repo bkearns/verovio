@@ -820,10 +820,12 @@ namespace {
         const double timestamp = 1.0 + (onset ? RationalValue(*onset) * beatType / 4.0 : 0.0);
         const std::vector<int> staffNumbers{ binding->second.number };
         ControlElement *control = nullptr;
+        const JObject *metronome
+            = kind == "direction" ? ObjectAt(conductor, "metronome", "/score/conductorTrack/events", false) : nullptr;
 
         // MusicXML projects global tempo and rehearsal events only on the first
         // referring staff, while dynamics remain part-local.
-        if ((kind == "tempo" || kind == "rehearsal") && renderedOnce.contains(conductorId)) return true;
+        if ((kind == "tempo" || kind == "rehearsal" || metronome) && renderedOnce.contains(conductorId)) return true;
         const bool firstRendering = !renderedOnce.contains(conductorId);
 
         if (kind == "tempo") {
@@ -882,6 +884,38 @@ namespace {
             rend->AddChild(text);
             rehearsal->AddChild(rend);
             control = rehearsal;
+            renderedOnce.insert(conductorId);
+        }
+        else if (kind == "direction" && metronome) {
+            const JObject *left = ObjectAt(*metronome, "left", "/score/conductorTrack/events/metronome", false);
+            const JObject *right = ObjectAt(*metronome, "rightNote", "/score/conductorTrack/events/metronome", false);
+            const std::string relation = metronome->get<jsonxx::String>("relation", "");
+            if (!left || !right || !left->has<jsonxx::String>("beatUnit") || !right->has<jsonxx::String>("beatUnit")
+                || relation != "equals") {
+                return Fail("JSM_UNSUPPORTED_DIRECTION", "/score/conductorTrack/events/metronome",
+                    "expected left and rightNote beat units with an equals relation");
+            }
+            Tempo *tempo = new Tempo();
+            tempo->SetTstamp(timestamp);
+            tempo->SetPlace(Placement(reference));
+            tempo->SetStaff(staffNumbers);
+            tempo->SetMmUnit(DurationFromType(left->get<jsonxx::String>("beatUnit")));
+            for (const JObject *note : { left, right }) {
+                Rend *rend = new Rend();
+                rend->SetGlyphAuth("smufl");
+                std::u32string glyph = MetronomeGlyph(note->get<jsonxx::String>("beatUnit"));
+                for (int dot = 0; dot < IntAt(*note, "dots", 0); ++dot) glyph += U" \xECB7";
+                Text *text = new Text();
+                text->SetText(glyph);
+                rend->AddChild(text);
+                tempo->AddChild(rend);
+                if (note == left) {
+                    Text *separator = new Text();
+                    separator->SetText(UTF8to32(" = "));
+                    tempo->AddChild(separator);
+                }
+            }
+            control = tempo;
             renderedOnce.insert(conductorId);
         }
         else if (kind == "direction") {

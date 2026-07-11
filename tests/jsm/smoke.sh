@@ -118,6 +118,37 @@ if "96" not in "".join(tempo.itertext()):
 PY
 
 jq '.score.conductorTrack.measures[0].events = [{
+        id:"metric-modulation", onset:[0,1], duration:[0,1], order:0, kind:"direction", value:null,
+        metronome:{left:{beatUnit:"quarter"}, relation:"equals", rightNote:{beatUnit:"eighth", dots:1}}
+    }]
+    | .score.parts[0].measures[0].conductorEventRefs = ["metric-modulation"]
+    | .score.parts[0].measures[0].measureEvents += [{
+        type:"directionRef", id:"metric-modulation-ref", onset:[0,1], duration:[0,1], order:0,
+        conductorEventRef:"metric-modulation", staffId:"staff-1", placement:"above"
+    }]' "$fixture" >"$tmp/metric-modulation.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/metric-modulation.mei" "$tmp/metric-modulation.jsm"
+python3 - "$tmp/metric-modulation.mei" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+tempo = next(element for element in root.iter() if element.tag.rsplit("}", 1)[-1] == "tempo")
+children = list(tempo)
+if tempo.attrib.get("place") != "above" or tempo.attrib.get("staff") != "1" or tempo.attrib.get("tstamp") != "1":
+    raise SystemExit("expected metric modulation above staff 1 at timestamp 1")
+if tempo.attrib.get("mm.unit") != "4" or "mm" in tempo.attrib or "midi.bpm" in tempo.attrib:
+    raise SystemExit("tempo-less metric modulation has incorrect metronome attributes")
+if [element.tag.rsplit("}", 1)[-1] for element in children] != ["rend", "rend"]:
+    raise SystemExit("expected metric modulation Tempo children: rend, rend")
+if children[0].attrib.get("glyph.auth") != "smufl" or "".join(children[0].itertext()) != "\ueca5":
+    raise SystemExit("expected quarter-note glyph on metric-modulation left side")
+if children[0].tail != " = ":
+    raise SystemExit("expected equals relation in metric modulation")
+if children[1].attrib.get("glyph.auth") != "smufl" or "".join(children[1].itertext()) != "\ueca7 \uecb7":
+    raise SystemExit("expected dotted-eighth glyphs on metric-modulation right side")
+PY
+
+jq '.score.conductorTrack.measures[0].events = [{
         id:"rehearsal-a", onset:[0,1], duration:[0,1], order:0, kind:"rehearsal", value:"A",
         rehearsal:{enclosure:"circle"}
     }]
