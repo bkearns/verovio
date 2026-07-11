@@ -348,6 +348,36 @@ if "$verovio" -r "$repo/data" -f jsm -o "$tmp/conflicting-meter.svg" "$tmp/confl
 fi
 rg -q 'JSM_CONFLICTING_METERS' "$tmp/conflicting-meter.log"
 
+jq '.score.parts[0].contexts[0].time = {beats: [3, 2, 3], beatType: 8}' \
+    "$fixture" >"$tmp/additive-initial-meter.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/additive-initial-meter.mei" \
+    "$tmp/additive-initial-meter.jsm"
+python3 - "$tmp/additive-initial-meter.mei" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+score_def = next(element for element in root.iter() if element.tag.rsplit("}", 1)[-1] == "scoreDef")
+direct_score_meters = [
+    element for element in score_def if element.tag.rsplit("}", 1)[-1] == "meterSig"
+]
+staff_defs = [
+    element for element in score_def.iter() if element.tag.rsplit("}", 1)[-1] == "staffDef"
+]
+staff_meters = [
+    element
+    for staff_def in staff_defs
+    for element in staff_def
+    if element.tag.rsplit("}", 1)[-1] == "meterSig"
+]
+if direct_score_meters:
+    raise SystemExit("initial meterSig must not be a direct scoreDef child")
+if len(staff_defs) != 1 or len(staff_meters) != 1:
+    raise SystemExit("expected exactly one initial meterSig under the one staffDef")
+if staff_meters[0].attrib.get("count") != "3+2+3" or staff_meters[0].attrib.get("unit") != "8":
+    raise SystemExit("expected initial staffDef meterSig count=3+2+3 unit=8")
+PY
+
 jq '.score.metadata.extensions["com.musicstand.musicxml.page-credits"] = [
     {attributes:{page:"1"}, items:[
         {kind:"credit-type", attributes:{}, text:"title"},

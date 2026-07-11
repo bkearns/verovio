@@ -1246,8 +1246,7 @@ namespace {
         return true;
     }
 
-    bool AddInitialContext(
-        StaffDef *staffDef, const JObject &part, const std::string &staffId, bool &meterAdded, ScoreDef *scoreDef)
+    bool AddInitialContext(StaffDef *staffDef, const JObject &part, const std::string &staffId)
     {
         const JObject *initial = InitialContext(part);
         if (!initial) return true;
@@ -1267,13 +1266,8 @@ namespace {
         }
         const JObject *key = ObjectAt(context, "key", "/score/parts/contexts", false);
         if (key && !AddKeySig(staffDef, *key, "/score/parts/contexts/key")) return false;
-        if (!meterAdded) {
-            const JObject *time = ObjectAt(context, "time", "/score/parts/contexts", false);
-            if (time) {
-                if (!AddMeter(scoreDef, *time, "/score/parts/contexts/time")) return false;
-                meterAdded = true;
-            }
-        }
+        const JObject *time = ObjectAt(context, "time", "/score/parts/contexts", false);
+        if (time && !AddMeter(staffDef, *time, "/score/parts/contexts/time")) return false;
         return true;
     }
 
@@ -1957,7 +1951,6 @@ bool JsmInput::Import(const std::string &data)
     score->GetScoreDef()->AddChild(staffGrp);
 
     std::map<std::string, StaffBinding> staffBindings;
-    bool meterAdded = false;
     int nextStaff = 1;
     for (unsigned int partIndex = 0; partIndex < parts->size(); ++partIndex) {
         const std::string partPath = "/score/parts/" + std::to_string(partIndex);
@@ -1993,7 +1986,7 @@ bool JsmInput::Import(const std::string &data)
             if (!partStaffGrp) AddPartLabels(staffDef, part);
             AddTranspositionAndPpq(staffDef, part, ppq);
             (partStaffGrp ? static_cast<Object *>(partStaffGrp) : static_cast<Object *>(staffGrp))->AddChild(staffDef);
-            if (!AddInitialContext(staffDef, part, staffId, meterAdded, score->GetScoreDef())) return false;
+            if (!AddInitialContext(staffDef, part, staffId)) return false;
             staffBindings.emplace(
                 staffId, StaffBinding{ nextStaff, partId, staffId, InitialFifths(part), InitialContextId(part) });
             ++nextStaff;
