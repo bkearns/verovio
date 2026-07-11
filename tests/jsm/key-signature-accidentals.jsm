@@ -9,11 +9,21 @@
       { "id": "bar-1", "number": "1", "duration": [4, 1] },
       { "id": "bar-2", "number": "2", "duration": [4, 1] }
     ],
-    "conductorTrack": { "measures": [] },
+    "conductorTrack": {
+      "measures": [
+        { "id": "conductor-measure-1", "barId": "bar-1", "events": [] },
+        { "id": "conductor-measure-2", "barId": "bar-2", "events": [] }
+      ]
+    },
     "parts": [
       {
         "id": "part-1",
         "name": "Clarinet",
+        "instrument": {
+          "id": "instrument-1",
+          "sound": "wind.reed.clarinet",
+          "transposition": { "diatonic": 0, "chromatic": 0, "octave": 0 }
+        },
         "staves": [{ "id": "staff-1", "number": 1, "name": "Clarinet" }],
         "voiceLanes": [{ "id": "lane-1", "homeStaffId": "staff-1" }],
         "contexts": [
@@ -83,6 +93,14 @@
         ]
       }
     ],
-    "views": [{ "id": "view-score", "kind": "conductor", "name": "Score", "partIds": ["part-1"] }]
+    "views": [
+      {
+        "id": "view-score",
+        "kind": "conductor",
+        "name": "Score",
+        "partIds": ["part-1"],
+        "layout": { "mode": "paginated", "spacing": "normal" }
+      }
+    ]
   }
 }

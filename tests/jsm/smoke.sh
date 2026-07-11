@@ -11,9 +11,14 @@ repo=$(cd "$(dirname "$0")/../.." && pwd)
 fixture="$repo/tests/jsm/key-signature-accidentals.jsm"
 tmp=$(mktemp -d)
 output="$tmp/output.svg"
+compact_output="$tmp/compact-output.svg"
 trap 'rm -rf "$tmp"' EXIT
 
 "$verovio" -r "$repo/data" -f auto -o "$output" "$fixture"
+"$verovio" -r "$repo/data" -f auto -o "$compact_output" "$repo/tests/jsm/key-signature-accidentals-compact.jsm"
+
+python3 "$repo/tests/jsm/compact_parity.py" --verovio "$verovio" --resources "$repo/data" \
+    --canonical "$fixture" --compact "$repo/tests/jsm/key-signature-accidentals-compact.jsm"
 
 rg -q 'id="event-b-flat-1"' "$output"
 rg -q 'data-jsm-tone-id="tone-b-flat-1"' "$output"
@@ -41,11 +46,31 @@ if "$verovio" -r "$repo/data" -f jsm -o "$tmp/duplicate.svg" "$tmp/duplicate.jsm
 fi
 rg -q 'JSM_DUPLICATE_ID' "$tmp/duplicate.log"
 
-printf '[ "JSM", "0.1.0", "c", {}, [] ]\n' >"$tmp/compact.jsm"
+jq '.[4][0] = 999999' "$repo/tests/jsm/key-signature-accidentals-compact.jsm" >"$tmp/compact.jsm"
 if "$verovio" -r "$repo/data" -f auto -o "$tmp/compact.svg" "$tmp/compact.jsm" >"$tmp/compact.log" 2>&1; then
-    echo "unsupported compact profile was accepted" >&2
+    echo "out-of-range compact reference was accepted" >&2
     exit 1
 fi
-rg -q 'JSM_PROFILE' "$tmp/compact.log"
+rg -q 'JSM_COMPACT_REF' "$tmp/compact.log"
 
-echo "JSM rejection smoke passed: unsafe IDs, duplicate IDs, and unsupported compact profile"
+jq '. as $doc | .[5] = {extraction: ["part",
+    ($doc[3].i | index("accidental-regression-score")),
+    ($doc[3].i | index("part-1")),
+    {algorithm:"sha256", scope:"document", value:("c" * 64)}, null,
+    [($doc[3].i | index("bar-1"))], true,
+    [[($doc[3].i | index("bar-1")), ($doc[3].i | index("part-1"))]]
+]}' "$repo/tests/jsm/key-signature-accidentals-compact.jsm" >"$tmp/compact-extraction.jsm"
+"$verovio" -r "$repo/data" -f jsm -o "$tmp/compact-extraction.svg" "$tmp/compact-extraction.jsm"
+
+jq '.[3].p[0].extensions = {"x.test": {padding:("a" * 1024)}}
+    | .[4][4][0][8][0][5][0][1][0][2][0][0] = "c"
+    | .[4][4][0][8][0][5][0][1][0][2][0][5] = [range(0;40000) | 0]' \
+    "$repo/tests/jsm/key-signature-accidentals-compact.jsm" >"$tmp/compact-amplification.jsm"
+if "$verovio" -r "$repo/data" -f jsm -o "$tmp/amplification.svg" "$tmp/compact-amplification.jsm" \
+    >"$tmp/amplification.log" 2>&1; then
+    echo "compact dictionary amplification was accepted" >&2
+    exit 1
+fi
+rg -q 'JSM_RESOURCE_LIMIT' "$tmp/amplification.log"
+
+echo "JSM smoke passed: canonical/compact parity, unsafe IDs, duplicate IDs, and compact reference validation"

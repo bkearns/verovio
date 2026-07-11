@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <map>
 #include <limits>
 #include <regex>
@@ -694,6 +695,592 @@ std::string InitialContextId(const JObject &part)
     return (context && context->has<jsonxx::String>("id")) ? context->get<jsonxx::String>("id") : std::string();
 }
 
+std::string JsonString(const std::string &value)
+{
+    std::ostringstream out;
+    out << '"';
+    for (unsigned char ch : value) {
+        switch (ch) {
+            case '"': out << "\\\""; break;
+            case '\\': out << "\\\\"; break;
+            case '\b': out << "\\b"; break;
+            case '\f': out << "\\f"; break;
+            case '\n': out << "\\n"; break;
+            case '\r': out << "\\r"; break;
+            case '\t': out << "\\t"; break;
+            default:
+                if (ch < 0x20) {
+                    const char hex[] = "0123456789abcdef";
+                    out << "\\u00" << hex[ch >> 4] << hex[ch & 15];
+                }
+                else out << static_cast<char>(ch);
+        }
+    }
+    out << '"';
+    return out.str();
+}
+
+std::string JsonValue(const jsonxx::Value &value)
+{
+    if (value.is<jsonxx::Null>()) return "null";
+    if (value.is<jsonxx::Boolean>()) return value.get<jsonxx::Boolean>() ? "true" : "false";
+    if (value.is<jsonxx::String>()) return JsonString(value.get<jsonxx::String>());
+    if (value.is<jsonxx::Number>()) {
+        std::ostringstream out;
+        out << std::setprecision(20) << value.get<jsonxx::Number>();
+        return out.str();
+    }
+    if (value.is<JArray>()) {
+        std::ostringstream out;
+        out << '[';
+        const JArray &array = value.get<JArray>();
+        for (size_t i = 0; i < array.size(); ++i) {
+            if (i) out << ',';
+            out << JsonValue(*array.values()[i]);
+        }
+        out << ']';
+        return out.str();
+    }
+    if (value.is<JObject>()) {
+        std::ostringstream out;
+        out << '{';
+        bool first = true;
+        for (const auto &entry : value.get<JObject>().kv_map()) {
+            if (!first) out << ',';
+            first = false;
+            out << JsonString(entry.first) << ':' << JsonValue(*entry.second);
+        }
+        out << '}';
+        return out.str();
+    }
+    return "null";
+}
+
+std::string JsonObject(const std::vector<std::pair<std::string, std::string>> &fields)
+{
+    std::ostringstream out;
+    out << '{';
+    for (size_t i = 0; i < fields.size(); ++i) {
+        if (i) out << ',';
+        out << JsonString(fields[i].first) << ':' << fields[i].second;
+    }
+    out << '}';
+    return out.str();
+}
+
+std::string JsonArray(const std::vector<std::string> &items)
+{
+    std::ostringstream out;
+    out << '[';
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (i) out << ',';
+        out << items[i];
+    }
+    out << ']';
+    return out.str();
+}
+
+class CompactJsmDecoder {
+public:
+    explicit CompactJsmDecoder(const JArray &root) : m_root(root) {}
+
+    bool Decode(std::string &canonical)
+    {
+        if (m_root.size() < 5 || !m_root.has<jsonxx::String>(0) || m_root.get<jsonxx::String>(0) != "JSM"
+            || !m_root.has<jsonxx::String>(1) || m_root.get<jsonxx::String>(1) != "0.1.0"
+            || !m_root.has<jsonxx::String>(2) || m_root.get<jsonxx::String>(2) != "c" || !m_root.has<JObject>(3)
+            || !m_root.has<JArray>(4))
+            return Fail("JSM_PROFILE", "/", "expected JSM 0.1.0 compact envelope");
+        const JObject &dict = m_root.get<JObject>(3);
+        if (!dict.has<JArray>("s") || !dict.has<JArray>("i") || !dict.has<JArray>("p"))
+            return Fail("JSM_COMPACT_DICTIONARY", "/3", "expected s, i, and p dictionaries");
+        m_strings = &dict.get<JArray>("s");
+        m_ids = &dict.get<JArray>("i");
+        m_tones = &dict.get<JArray>("p");
+        if (m_strings->size() > 262144 || m_ids->size() > 262144 || m_tones->size() > 262144)
+            return Fail("JSM_RESOURCE_LIMIT", "/3", "compact dictionary exceeds 262144 entries");
+        std::string score;
+        if (!Score(m_root.get<JArray>(4), score)) return false;
+        std::vector<std::pair<std::string, std::string>> fields = { { "format", "\"JSM\"" }, { "version", "\"0.1.0\"" },
+            { "profile", "\"canonical\"" }, { "score", score } };
+        const jsonxx::Value *extras = At(m_root, 5);
+        if (extras && !extras->is<jsonxx::Null>()) {
+            if (!extras->is<JObject>()) return Fail("JSM_COMPACT_EXTRAS", "/5", "expected object or null");
+            for (const auto &entry : extras->get<JObject>().kv_map()) {
+                if (entry.first == "extraction") {
+                    if (!entry.second->is<JArray>())
+                        return Fail("JSM_COMPACT_EXTRACTION", "/5/extraction", "expected tuple");
+                    std::string extraction;
+                    if (!Extraction(entry.second->get<JArray>(), extraction)) return false;
+                    fields.push_back({ "extraction", extraction });
+                }
+                else
+                    fields.push_back({ entry.first, JsonValue(*entry.second) });
+            }
+        }
+        canonical = JsonObject(fields);
+        if (canonical.size() > 64 * 1024 * 1024)
+            return Fail("JSM_RESOURCE_LIMIT", "/", "expanded compact document exceeds 64 MiB");
+        return true;
+    }
+
+private:
+    const jsonxx::Value *At(const JArray &array, size_t index) const
+    {
+        return index < array.size() ? array.values()[index] : nullptr;
+    }
+    bool Ref(const JArray *table, const jsonxx::Value *reference, std::string &result, const std::string &path)
+    {
+        if (!reference || !reference->is<jsonxx::Number>()) return Fail("JSM_COMPACT_REF", path, "expected reference");
+        const long double raw = reference->get<jsonxx::Number>();
+        if (raw < 0 || raw != std::floor(raw) || raw >= table->size())
+            return Fail("JSM_COMPACT_REF", path, "reference outside dictionary");
+        const std::string expanded = JsonValue(*table->values()[static_cast<size_t>(raw)]);
+        if (expanded.size() > 32 * 1024 * 1024 - m_expandedReferenceBytes)
+            return Fail("JSM_RESOURCE_LIMIT", path, "expanded compact references exceed 32 MiB");
+        m_expandedReferenceBytes += expanded.size();
+        result = expanded;
+        return true;
+    }
+    bool Id(const JArray &a, size_t i, std::string &out) { return Ref(m_ids, At(a, i), out, "/compact/id"); }
+    bool Str(const JArray &a, size_t i, std::string &out) { return Ref(m_strings, At(a, i), out, "/compact/string"); }
+    bool Tone(const jsonxx::Value *v, std::string &out) { return Ref(m_tones, v, out, "/compact/tone"); }
+    void OptionalRaw(const JArray &a, size_t i, const std::string &name,
+        std::vector<std::pair<std::string, std::string>> &fields) const
+    {
+        const jsonxx::Value *v = At(a, i);
+        if (v && !v->is<jsonxx::Null>()) fields.push_back({ name, JsonValue(*v) });
+    }
+    bool RefArray(const jsonxx::Value *v, const JArray *table, std::string &out)
+    {
+        if (!v || !v->is<JArray>()) return Fail("JSM_COMPACT_ARRAY", "/compact", "expected reference array");
+        if (v->get<JArray>().size() > 262144)
+            return Fail("JSM_RESOURCE_LIMIT", "/compact", "compact collection exceeds 262144 entries");
+        std::vector<std::string> items;
+        for (auto item : v->get<JArray>().values()) {
+            std::string decoded;
+            if (!Ref(table, item, decoded, "/compact/ref")) return false;
+            items.push_back(decoded);
+        }
+        out = JsonArray(items);
+        return true;
+    }
+    template <typename F> bool MapArray(const jsonxx::Value *v, std::string &out, F fn)
+    {
+        if (!v || !v->is<JArray>()) return Fail("JSM_COMPACT_ARRAY", "/compact", "expected array");
+        if (v->get<JArray>().size() > 262144)
+            return Fail("JSM_RESOURCE_LIMIT", "/compact", "compact collection exceeds 262144 entries");
+        std::vector<std::string> items;
+        for (auto item : v->get<JArray>().values()) {
+            if (!item->is<JArray>()) return Fail("JSM_COMPACT_TUPLE", "/compact", "expected tuple");
+            std::string decoded;
+            if (!(this->*fn)(item->get<JArray>(), decoded)) return false;
+            items.push_back(decoded);
+        }
+        out = JsonArray(items);
+        return true;
+    }
+    bool LogicalBar(const JArray &a, std::string &out)
+    {
+        std::string id, number;
+        if (a.size() < 3 || !Id(a, 0, id) || !Str(a, 1, number)) return false;
+        std::vector<std::pair<std::string, std::string>> f
+            = { { "id", id }, { "number", number }, { "duration", JsonValue(*At(a, 2)) } };
+        const char *names[] = { "implicit", "navigation", "anchor", "extensions" };
+        for (size_t i = 0; i < 4; ++i) OptionalRaw(a, 3 + i, names[i], f);
+        out = JsonObject(f);
+        return true;
+    }
+    bool ConductorEvent(const JArray &a, std::string &out)
+    {
+        std::string id;
+        if (a.size() < 5 || !Id(a, 0, id)) return false;
+        std::vector<std::pair<std::string, std::string>> f = { { "id", id }, { "onset", JsonValue(*At(a, 1)) },
+            { "duration", JsonValue(*At(a, 2)) }, { "order", JsonValue(*At(a, 3)) }, { "kind", JsonValue(*At(a, 4)) } };
+        OptionalRaw(a, 5, "value", f);
+        OptionalRaw(a, 6, "tempo", f);
+        const jsonxx::Value *extras = At(a, 7);
+        if (extras && extras->is<JObject>())
+            for (const auto &e : extras->get<JObject>().kv_map()) f.push_back({ e.first, JsonValue(*e.second) });
+        out = JsonObject(f);
+        return true;
+    }
+    bool ConductorMeasure(const JArray &a, std::string &out)
+    {
+        std::string id, bar, events;
+        if (a.size() < 3 || !Id(a, 0, id) || !Id(a, 1, bar)
+            || !MapArray(At(a, 2), events, &CompactJsmDecoder::ConductorEvent))
+            return false;
+        std::vector<std::pair<std::string, std::string>> f = { { "id", id }, { "barId", bar }, { "events", events } };
+        OptionalRaw(a, 3, "anchor", f);
+        OptionalRaw(a, 4, "extensions", f);
+        out = JsonObject(f);
+        return true;
+    }
+    bool StaffDef(const JArray &a, std::string &out)
+    {
+        std::string id;
+        if (a.size() < 2 || !Id(a, 0, id)) return false;
+        std::vector<std::pair<std::string, std::string>> f = { { "id", id }, { "number", JsonValue(*At(a, 1)) } };
+        std::string name;
+        if (At(a, 2) && !At(a, 2)->is<jsonxx::Null>()) {
+            if (!Str(a, 2, name)) return false;
+            f.push_back({ "name", name });
+        }
+        OptionalRaw(a, 3, "extensions", f);
+        out = JsonObject(f);
+        return true;
+    }
+    bool VoiceLane(const JArray &a, std::string &out)
+    {
+        std::string id, staff;
+        if (a.size() < 2 || !Id(a, 0, id) || !Id(a, 1, staff)) return false;
+        std::vector<std::pair<std::string, std::string>> f = { { "id", id }, { "homeStaffId", staff } };
+        std::string name;
+        if (At(a, 2) && !At(a, 2)->is<jsonxx::Null>()) {
+            if (!Str(a, 2, name)) return false;
+            f.push_back({ "name", name });
+        }
+        OptionalRaw(a, 3, "extensions", f);
+        out = JsonObject(f);
+        return true;
+    }
+    bool StaffContext(const JArray &a, std::string &out)
+    {
+        std::string id;
+        if (a.size() < 2 || !Id(a, 0, id)) return false;
+        std::vector<std::pair<std::string, std::string>> f = { { "staffId", id }, { "clef", JsonValue(*At(a, 1)) } };
+        OptionalRaw(a, 2, "lines", f);
+        OptionalRaw(a, 3, "extensions", f);
+        out = JsonObject(f);
+        return true;
+    }
+    bool Context(const JArray &a, std::string &out)
+    {
+        std::string id, st;
+        if (a.size() < 6 || !Id(a, 0, id) || !MapArray(At(a, 5), st, &CompactJsmDecoder::StaffContext)) return false;
+        std::vector<std::pair<std::string, std::string>> f = { { "id", id }, { "contentHash", JsonValue(*At(a, 1)) },
+            { "time", JsonValue(*At(a, 2)) }, { "key", JsonValue(*At(a, 3)) } };
+        OptionalRaw(a, 4, "transpose", f);
+        f.push_back({ "staves", st });
+        OptionalRaw(a, 6, "extensions", f);
+        out = JsonObject(f);
+        return true;
+    }
+    bool Instrument(const JArray &a, std::string &out)
+    {
+        std::string id, sound;
+        if (a.size() < 4 || !Id(a, 0, id) || !Str(a, 2, sound)) return false;
+        std::vector<std::pair<std::string, std::string>> f
+            = { { "id", id }, { "sound", sound }, { "transposition", JsonValue(*At(a, 3)) } };
+        std::string name;
+        if (At(a, 1) && !At(a, 1)->is<jsonxx::Null>()) {
+            if (!Str(a, 1, name)) return false;
+            f.push_back({ "name", name });
+        }
+        const char *n[] = { "midiProgram", "midiChannel", "writtenRange", "concertRange", "percussion", "extensions" };
+        for (size_t i = 0; i < 6; ++i) OptionalRaw(a, 4 + i, n[i], f);
+        out = JsonObject(f);
+        return true;
+    }
+    bool Endpoint(const JArray &a, std::string &out)
+    {
+        if (a.size() < 4 || !a.has<jsonxx::String>(0)) return false;
+        std::string tag = a.get<jsonxx::String>(0), x;
+        std::vector<std::pair<std::string, std::string>> f;
+        if (tag == "e") {
+            f.push_back({ "kind", "\"event\"" });
+            if (!Id(a, 3, x)) return false;
+            f.push_back({ "eventId", x });
+            const char *n[] = { "partId", "measureId" };
+            for (size_t i = 1; i <= 2; ++i)
+                if (At(a, i) && !At(a, i)->is<jsonxx::Null>()) {
+                    if (!Id(a, i, x)) return false;
+                    f.push_back({ n[i - 1], x });
+                }
+            if (At(a, 4) && !At(a, 4)->is<jsonxx::Null>()) {
+                if (!Id(a, 4, x)) return false;
+                f.push_back({ "toneId", x });
+            }
+        }
+        else if (tag == "p") {
+            f.push_back({ "kind", "\"position\"" });
+            if (!Id(a, 2, x)) return false;
+            f.push_back({ "barId", x });
+            f.push_back({ "onset", JsonValue(*At(a, 3)) });
+            const char *n[] = { "partId", "staffId", "laneId" };
+            const size_t p[] = { 1, 4, 5 };
+            for (size_t i = 0; i < 3; ++i)
+                if (At(a, p[i]) && !At(a, p[i])->is<jsonxx::Null>()) {
+                    if (!Id(a, p[i], x)) return false;
+                    f.push_back({ n[i], x });
+                }
+        }
+        else {
+            f.push_back({ "kind", "\"barline\"" });
+            if (!Id(a, 2, x)) return false;
+            f.push_back({ "barId", x });
+            f.push_back({ "side", JsonValue(*At(a, 3)) });
+            if (At(a, 1) && !At(a, 1)->is<jsonxx::Null>()) {
+                if (!Id(a, 1, x)) return false;
+                f.push_back({ "partId", x });
+            }
+            if (At(a, 4) && !At(a, 4)->is<jsonxx::Null>()) {
+                if (!Id(a, 4, x)) return false;
+                f.push_back({ "staffId", x });
+            }
+        }
+        out = JsonObject(f);
+        return true;
+    }
+    bool Spanner(const JArray &a, std::string &out)
+    {
+        std::string id, start, end;
+        if (a.size() < 4 || !Id(a, 0, id) || !a.has<JArray>(2) || !a.has<JArray>(3)
+            || !Endpoint(a.get<JArray>(2), start) || !Endpoint(a.get<JArray>(3), end))
+            return false;
+        std::vector<std::pair<std::string, std::string>> f
+            = { { "id", id }, { "kind", JsonValue(*At(a, 1)) }, { "start", start }, { "end", end } };
+        const char *n[] = { "tuplet", "number", "placement", "properties", "anchor", "extensions" };
+        for (size_t i = 0; i < 6; ++i) OptionalRaw(a, 4 + i, n[i], f);
+        out = JsonObject(f);
+        return true;
+    }
+    bool Event(const JArray &a, std::string &out)
+    {
+        if (a.size() < 5 || !a.has<jsonxx::String>(0)) return false;
+        const std::string tag = a.get<jsonxx::String>(0);
+        std::string id;
+        if (!Id(a, 1, id)) return false;
+        std::string type = tag == "n" ? "note"
+            : tag == "c"              ? "chord"
+            : tag == "r"              ? "rest"
+            : tag == "s"              ? "spacer"
+                                      : "forward";
+        std::vector<std::pair<std::string, std::string>> f
+            = { { "type", JsonString(type) }, { "id", id }, { "onset", JsonValue(*At(a, 2)) },
+                  { "duration", JsonValue(*At(a, 3)) }, { "order", JsonValue(*At(a, 4)) } };
+        size_t extra = 5;
+        if (tag == "n") {
+            std::string tone;
+            if (!Tone(At(a, 5), tone)) return false;
+            f.push_back({ "tone", tone });
+            f.push_back({ "noteType", JsonValue(*At(a, 6)) });
+            extra = 7;
+        }
+        else if (tag == "c") {
+            if (!At(a, 5) || !At(a, 5)->is<JArray>()) return false;
+            std::vector<std::string> tones;
+            for (auto v : At(a, 5)->get<JArray>().values()) {
+                std::string t;
+                if (!Tone(v, t)) return false;
+                tones.push_back(t);
+            }
+            f.push_back({ "tones", JsonArray(tones) });
+            f.push_back({ "noteType", JsonValue(*At(a, 6)) });
+            extra = 7;
+        }
+        else if (tag == "r") {
+            f.push_back({ "noteType", JsonValue(*At(a, 5)) });
+            extra = 6;
+        }
+        const jsonxx::Value *e = At(a, extra);
+        if (e && e->is<JObject>())
+            for (const auto &v : e->get<JObject>().kv_map()) {
+                if (v.first == "staffId") {
+                    std::string x;
+                    if (!Ref(m_ids, v.second, x, "/compact/staffId")) return false;
+                    f.push_back({ v.first, x });
+                }
+                else
+                    f.push_back({ v.first, JsonValue(*v.second) });
+            }
+        out = JsonObject(f);
+        return true;
+    }
+    bool Voice(const JArray &a, std::string &out)
+    {
+        std::string id, lane, events;
+        if (a.size() < 3 || !Id(a, 0, id) || !Id(a, 1, lane) || !MapArray(At(a, 2), events, &CompactJsmDecoder::Event))
+            return false;
+        std::vector<std::pair<std::string, std::string>> f = { { "id", id }, { "laneId", lane }, { "events", events } };
+        OptionalRaw(a, 3, "extensions", f);
+        out = JsonObject(f);
+        return true;
+    }
+    bool Staff(const JArray &a, std::string &out)
+    {
+        std::string id, voices;
+        if (a.size() < 2 || !Id(a, 0, id) || !MapArray(At(a, 1), voices, &CompactJsmDecoder::Voice)) return false;
+        std::vector<std::pair<std::string, std::string>> f = { { "staffId", id }, { "voices", voices } };
+        OptionalRaw(a, 2, "anchor", f);
+        OptionalRaw(a, 3, "extensions", f);
+        out = JsonObject(f);
+        return true;
+    }
+    bool MeasureEvent(const JArray &a, std::string &out)
+    {
+        if (a.size() < 5 || !a.has<jsonxx::String>(0)) return false;
+        std::string tag = a.get<jsonxx::String>(0), id, x;
+        if (!Id(a, 1, id)) return false;
+        std::vector<std::pair<std::string, std::string>> f;
+        if (tag == "x") {
+            if (!Id(a, 4, x)) return false;
+            f = { { "type", "\"contextChange\"" }, { "id", id }, { "onset", JsonValue(*At(a, 2)) },
+                { "duration", "[0,1]" }, { "order", JsonValue(*At(a, 3)) }, { "contextRef", x } };
+            if (At(a, 5) && !At(a, 5)->is<jsonxx::Null>()) {
+                std::string refs;
+                if (!RefArray(At(a, 5), m_ids, refs)) return false;
+                f.push_back({ "staffIds", refs });
+            }
+        }
+        else if (tag == "d") {
+            if (!Id(a, 5, x)) return false;
+            f = { { "type", "\"directionRef\"" }, { "id", id }, { "onset", JsonValue(*At(a, 2)) },
+                { "duration", JsonValue(*At(a, 3)) }, { "order", JsonValue(*At(a, 4)) }, { "conductorEventRef", x } };
+        }
+        else {
+            f = { { "type", "\"barline\"" }, { "id", id }, { "onset", JsonValue(*At(a, 2)) }, { "duration", "[0,1]" },
+                { "order", JsonValue(*At(a, 3)) }, { "side", JsonValue(*At(a, 4)) },
+                { "style", JsonValue(*At(a, 5)) } };
+        }
+        size_t ei = tag == "x" ? 6 : tag == "d" ? 6 : 6;
+        const jsonxx::Value *e = At(a, ei);
+        if (e && e->is<JObject>())
+            for (const auto &v : e->get<JObject>().kv_map()) {
+                if (v.first == "staffId") {
+                    if (!Ref(m_ids, v.second, x, "/compact/staffId")) return false;
+                    f.push_back({ v.first, x });
+                }
+                else
+                    f.push_back({ v.first, JsonValue(*v.second) });
+            }
+        out = JsonObject(f);
+        return true;
+    }
+    bool Measure(const JArray &a, std::string &out)
+    {
+        std::string id, bar, ctx, refs, staves, events, spanners, active;
+        if (a.size() < 9 || !Id(a, 0, id) || !Id(a, 1, bar) || !Id(a, 3, ctx) || !RefArray(At(a, 4), m_ids, refs)
+            || !MapArray(At(a, 5), staves, &CompactJsmDecoder::Staff)
+            || !MapArray(At(a, 6), events, &CompactJsmDecoder::MeasureEvent)
+            || !MapArray(At(a, 7), spanners, &CompactJsmDecoder::Spanner))
+            return false;
+        if (!At(a, 8) || !At(a, 8)->is<JArray>()) return false;
+        std::vector<std::string> acts;
+        for (auto v : At(a, 8)->get<JArray>().values()) {
+            if (!v->is<JArray>()) return false;
+            const JArray &x = v->get<JArray>();
+            std::string sid;
+            if (!Id(x, 0, sid)) return false;
+            acts.push_back(JsonObject({ { "spannerId", sid }, { "role", JsonValue(*At(x, 1)) } }));
+        }
+        active = JsonArray(acts);
+        std::vector<std::pair<std::string, std::string>> f
+            = { { "id", id }, { "barId", bar }, { "duration", JsonValue(*At(a, 2)) }, { "contextRef", ctx },
+                  { "conductorEventRefs", refs }, { "staves", staves }, { "measureEvents", events },
+                  { "spanners", spanners }, { "activeSpannerRefs", active } };
+        const jsonxx::Value *e = At(a, 9);
+        if (e && e->is<JObject>())
+            for (const auto &v : e->get<JObject>().kv_map()) f.push_back({ v.first, JsonValue(*v.second) });
+        out = JsonObject(f);
+        return true;
+    }
+    bool Part(const JArray &a, std::string &out)
+    {
+        std::string id, name, instrument, staves, lanes, contexts, measures;
+        if (a.size() < 9 || !Id(a, 0, id) || !Str(a, 1, name) || !a.has<JArray>(3)
+            || !Instrument(a.get<JArray>(3), instrument) || !MapArray(At(a, 4), staves, &CompactJsmDecoder::StaffDef)
+            || !MapArray(At(a, 5), lanes, &CompactJsmDecoder::VoiceLane)
+            || !MapArray(At(a, 7), contexts, &CompactJsmDecoder::Context)
+            || !MapArray(At(a, 8), measures, &CompactJsmDecoder::Measure))
+            return false;
+        std::vector<std::pair<std::string, std::string>> f
+            = { { "id", id }, { "name", name }, { "instrument", instrument }, { "staves", staves },
+                  { "voiceLanes", lanes }, { "contexts", contexts }, { "measures", measures } };
+        std::string x;
+        if (At(a, 2) && !At(a, 2)->is<jsonxx::Null>()) {
+            if (!Str(a, 2, x)) return false;
+            f.push_back({ "abbreviation", x });
+        }
+        if (At(a, 6) && !At(a, 6)->is<jsonxx::Null>()) {
+            if (!RefArray(At(a, 6), m_ids, x)) return false;
+            f.push_back({ "groups", x });
+        }
+        OptionalRaw(a, 9, "anchor", f);
+        OptionalRaw(a, 10, "extensions", f);
+        out = JsonObject(f);
+        return true;
+    }
+    bool Extraction(const JArray &a, std::string &out)
+    {
+        if (a.size() < 8) return Fail("JSM_COMPACT_EXTRACTION", "/5/extraction", "tuple is too short");
+        std::string sourceScore;
+        std::string sourcePart;
+        std::string sourceBars;
+        if (!Id(a, 1, sourceScore) || !Id(a, 2, sourcePart) || !RefArray(At(a, 5), m_ids, sourceBars)) return false;
+        if (!At(a, 7) || !At(a, 7)->is<JArray>())
+            return Fail("JSM_COMPACT_EXTRACTION", "/5/extraction/7", "expected reference closure tuple");
+        const JArray &closureTuple = At(a, 7)->get<JArray>();
+        std::string included;
+        if (closureTuple.empty() || !RefArray(At(closureTuple, 0), m_ids, included)) return false;
+        std::vector<std::pair<std::string, std::string>> closure = { { "includedIds", included } };
+        if (At(closureTuple, 1) && !At(closureTuple, 1)->is<jsonxx::Null>()) {
+            std::string external;
+            if (!RefArray(At(closureTuple, 1), m_ids, external)) return false;
+            closure.push_back({ "externalRefs", external });
+        }
+        std::vector<std::pair<std::string, std::string>> fields
+            = { { "kind", JsonValue(*At(a, 0)) }, { "sourceScoreId", sourceScore }, { "sourcePartId", sourcePart },
+                  { "sourceHash", JsonValue(*At(a, 3)) }, { "sourceBarIds", sourceBars },
+                  { "preservedVerbatim", JsonValue(*At(a, 6)) }, { "referenceClosure", JsonObject(closure) } };
+        if (At(a, 4) && !At(a, 4)->is<jsonxx::Null>()) {
+            std::string sourceUri;
+            if (!Str(a, 4, sourceUri)) return false;
+            fields.push_back({ "sourceUri", sourceUri });
+        }
+        if (At(a, 8) && !At(a, 8)->is<jsonxx::Null>()) {
+            std::string incoming;
+            if (!MapArray(At(a, 8), incoming, &CompactJsmDecoder::Spanner)) return false;
+            fields.push_back({ "incomingSpanners", incoming });
+        }
+        if (At(a, 9) && !At(a, 9)->is<jsonxx::Null>()) {
+            std::string extractedAt;
+            if (!Str(a, 9, extractedAt)) return false;
+            fields.push_back({ "extractedAt", extractedAt });
+        }
+        OptionalRaw(a, 10, "extensions", fields);
+        out = JsonObject(fields);
+        return true;
+    }
+    bool Score(const JArray &a, std::string &out)
+    {
+        std::string id, bars, parts;
+        if (a.size() < 6 || !Id(a, 0, id) || !MapArray(At(a, 2), bars, &CompactJsmDecoder::LogicalBar) || !At(a, 3)
+            || !At(a, 3)->is<JArray>() || !MapArray(At(a, 4), parts, &CompactJsmDecoder::Part))
+            return false;
+        const JArray &trackTuple = At(a, 3)->get<JArray>();
+        std::string conductor;
+        if (trackTuple.empty() || !MapArray(At(trackTuple, 0), conductor, &CompactJsmDecoder::ConductorMeasure))
+            return false;
+        std::vector<std::pair<std::string, std::string>> track = { { "measures", conductor } };
+        OptionalRaw(trackTuple, 1, "extensions", track);
+        std::vector<std::pair<std::string, std::string>> f = { { "id", id }, { "logicalBars", bars },
+            { "conductorTrack", JsonObject(track) }, { "parts", parts }, { "views", JsonValue(*At(a, 5)) } };
+        OptionalRaw(a, 1, "metadata", f);
+        const char *n[] = { "performance", "analysis", "provenance", "validation", "extensions" };
+        for (size_t i = 0; i < 5; ++i) OptionalRaw(a, 6 + i, n[i], f);
+        out = JsonObject(f);
+        return true;
+    }
+
+    const JArray &m_root;
+    const JArray *m_strings = nullptr;
+    const JArray *m_ids = nullptr;
+    const JArray *m_tones = nullptr;
+    size_t m_expandedReferenceBytes = 0;
+};
+
 } // namespace
 
 JsmInput::JsmInput(Doc *doc) : Input(doc) {}
@@ -707,7 +1294,9 @@ bool JsmInput::Import(const std::string &data)
         JArray compact;
         if (!compact.parse(data)) return Fail("JSM_PARSE_ERROR", "/", "invalid compact JSON");
         if (compact.size() >= 3 && compact.has<jsonxx::String>(0) && compact.get<jsonxx::String>(0) == "JSM") {
-            return Fail("JSM_PROFILE", "/2", "compact profile decoding is not yet implemented in the native adapter");
+            std::string canonical;
+            CompactJsmDecoder decoder(compact);
+            return decoder.Decode(canonical) && Import(canonical);
         }
         return Fail("JSM_FORMAT", "/", "expected compact JSM envelope");
     }
