@@ -278,6 +278,7 @@ namespace {
             // pitch.alter is semantic. A written accidental is only needed when it
             // changes the active key/measure state, or when explicitly courtesy.
             if (alter != activeAlter || courtesy) accid->SetAccid(accidental);
+            if (courtesy) accid->SetEnclose(ENCLOSURE_paren);
             note->AddChild(accid);
         }
         accidentalState[stateKey] = alter;
