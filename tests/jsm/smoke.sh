@@ -81,6 +81,70 @@ jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].articulations = ["
 "$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/caesura.mei" "$tmp/caesura.jsm"
 rg -q '<caesura[^>]*staff="1"[^>]*tstamp="1.5"' "$tmp/caesura.mei"
 
+jq '.score.parts[0].measures[0].staves[0].voices[0].events = [
+        {type:"note", id:"ornament-event-1", onset:[0,2], duration:[1,2], order:0, noteType:"eighth",
+            ornaments:["trill-mark"], tone:{id:"ornament-tone-1",
+                pitch:{id:"ornament-pitch-1", kind:"pitched", step:"C", alter:0, octave:5}}},
+        {type:"note", id:"ornament-event-2", onset:[1,2], duration:[1,2], order:1, noteType:"eighth",
+            ornaments:["mordent"], tone:{id:"ornament-tone-2",
+                pitch:{id:"ornament-pitch-2", kind:"pitched", step:"D", alter:0, octave:5}}},
+        {type:"note", id:"ornament-event-3", onset:[2,2], duration:[1,2], order:2, noteType:"eighth",
+            ornaments:["inverted-mordent"], tone:{id:"ornament-tone-3",
+                pitch:{id:"ornament-pitch-3", kind:"pitched", step:"E", alter:0, octave:5}}},
+        {type:"note", id:"ornament-event-4", onset:[3,2], duration:[1,2], order:3, noteType:"eighth",
+            ornaments:["turn"], tone:{id:"ornament-tone-4",
+                pitch:{id:"ornament-pitch-4", kind:"pitched", step:"F", alter:0, octave:5}}},
+        {type:"note", id:"ornament-event-5", onset:[4,2], duration:[1,2], order:4, noteType:"eighth",
+            ornaments:["inverted-turn"], tone:{id:"ornament-tone-5",
+                pitch:{id:"ornament-pitch-5", kind:"pitched", step:"G", alter:0, octave:5}}},
+        {type:"note", id:"ornament-event-6", onset:[5,2], duration:[1,2], order:5, noteType:"eighth",
+            ornaments:["delayed-turn"], tone:{id:"ornament-tone-6",
+                pitch:{id:"ornament-pitch-6", kind:"pitched", step:"A", alter:0, octave:5}}},
+        {type:"rest", id:"ornament-fill", onset:[6,2], duration:[1,1], order:6, noteType:"quarter"}
+    ]' "$fixture" >"$tmp/ornament-matrix.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/ornament-matrix.mei" "$tmp/ornament-matrix.jsm"
+python3 - "$tmp/ornament-matrix.mei" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+ornaments = [
+    element
+    for element in root.iter()
+    if element.tag.rsplit("}", 1)[-1] in {"trill", "mordent", "turn"}
+]
+expected = [
+    ("trill", "#ornament-event-1", None, None),
+    ("mordent", "#ornament-event-2", "lower", None),
+    ("mordent", "#ornament-event-3", "upper", None),
+    ("turn", "#ornament-event-4", "upper", None),
+    ("turn", "#ornament-event-5", "lower", None),
+    ("turn", "#ornament-event-6", "upper", "true"),
+]
+actual = [
+    (
+        element.tag.rsplit("}", 1)[-1],
+        element.attrib.get("startid"),
+        element.attrib.get("form"),
+        element.attrib.get("delayed"),
+    )
+    for element in ornaments
+]
+if actual != expected:
+    raise SystemExit(f"ornament matrix mismatch: expected {expected!r}, found {actual!r}")
+if any(element.attrib.get("staff") != "1" for element in ornaments):
+    raise SystemExit("expected every ornament to anchor to staff 1")
+PY
+
+jq '.score.parts[0].measures[0].staves[0].voices[0].events[5].ornaments = ["shake"]' \
+    "$tmp/ornament-matrix.jsm" >"$tmp/unsupported-ornament.jsm"
+if "$verovio" -r "$repo/data" -f jsm -o "$tmp/unsupported-ornament.svg" \
+    "$tmp/unsupported-ornament.jsm" >"$tmp/unsupported-ornament.log" 2>&1; then
+    echo "unsupported ornament was accepted" >&2
+    exit 1
+fi
+rg -q 'JSM_UNSUPPORTED_ORNAMENT.*ornaments/0.*shake' "$tmp/unsupported-ornament.log"
+
 echo "JSM native smoke passed: stable IDs present; written accidentals=$written_accidentals"
 
 jq '.score.conductorTrack.measures[0].events = [{

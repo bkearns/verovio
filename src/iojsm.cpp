@@ -47,6 +47,7 @@
 #include "mdiv.h"
 #include "measure.h"
 #include "metersig.h"
+#include "mordent.h"
 #include "mrest.h"
 #include "note.h"
 #include "octave.h"
@@ -71,6 +72,7 @@
 #include "tie.h"
 #include "trill.h"
 #include "tuplet.h"
+#include "turn.h"
 #include "vrv.h"
 
 namespace vrv {
@@ -346,6 +348,46 @@ namespace {
             Artic *artic = new Artic();
             artic->SetArtic(result);
             event->AddChild(artic);
+        }
+        return true;
+    }
+
+    bool AddOrnaments(Object *event, const JObject &source, Measure *measure, const std::string &path, int staffNumber)
+    {
+        const JArray *values = ArrayAt(source, "ornaments", path, false);
+        if (!values) return true;
+        if (!event->Is(NOTE)) {
+            return Fail("JSM_UNSUPPORTED_ORNAMENT_EVENT", path + "/ornaments", "ornaments require a note event");
+        }
+        for (unsigned int i = 0; i < values->size(); ++i) {
+            const std::string ornamentPath = path + "/ornaments/" + std::to_string(i);
+            if (!values->has<jsonxx::String>(i)) {
+                return Fail("JSM_INVALID_ORNAMENT", ornamentPath, "expected string");
+            }
+            const std::string name = values->get<jsonxx::String>(i);
+            ControlElement *ornament = nullptr;
+            if (name == "trill-mark") {
+                ornament = new Trill();
+            }
+            else if (name == "mordent" || name == "inverted-mordent") {
+                Mordent *mordent = new Mordent();
+                mordent->SetForm(name == "mordent" ? mordentLog_FORM_lower : mordentLog_FORM_upper);
+                ornament = mordent;
+            }
+            else if (name == "turn" || name == "inverted-turn" || name == "delayed-turn") {
+                Turn *turn = new Turn();
+                turn->SetForm(name == "inverted-turn" ? turnLog_FORM_lower : turnLog_FORM_upper);
+                if (name == "delayed-turn") turn->SetDelayed(BOOLEAN_true);
+                ornament = turn;
+            }
+            else {
+                return Fail("JSM_UNSUPPORTED_ORNAMENT", ornamentPath, name);
+            }
+            ornament->SetID(event->GetID() + "-ornament-" + std::to_string(i + 1));
+            TimePointInterface *timePoint = ornament->GetTimePointInterface();
+            timePoint->SetStaff({ staffNumber });
+            timePoint->SetStartid("#" + event->GetID());
+            measure->AddChild(ornament);
         }
         return true;
     }
@@ -2511,7 +2553,8 @@ bool JsmInput::Import(const std::string &data)
                             return Fail("JSM_UNSUPPORTED_EVENT", eventPath + "/type", type);
                         }
                         if (!AddArticulations(
-                                element, event, measure, eventPath, binding->second.number, InitialBeatType(part))) {
+                                element, event, measure, eventPath, binding->second.number, InitialBeatType(part))
+                            || !AddOrnaments(element, event, measure, eventPath, binding->second.number)) {
                             delete element;
                             return false;
                         }
