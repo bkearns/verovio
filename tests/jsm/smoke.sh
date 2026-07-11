@@ -149,6 +149,40 @@ if children[1].attrib.get("glyph.auth") != "smufl" or "".join(children[1].iterte
 PY
 
 jq '.score.conductorTrack.measures[0].events = [{
+        id:"direction-dc", onset:[3,1], duration:[0,1], order:0, kind:"direction", value:"D.C."
+    }]
+    | .score.parts[0].measures[0].conductorEventRefs = ["direction-dc"]
+    | .score.parts[0].measures[0].measureEvents += [{
+        type:"directionRef", id:"direction-dc-ref", onset:[1,1], duration:[0,1], order:0,
+        conductorEventRef:"direction-dc", staffId:"staff-1", placement:"below"
+    }]
+    | .score.parts[0].measures[0].navigation = {jump:"dc"}' "$fixture" >"$tmp/direction-dc.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/direction-dc.mei" "$tmp/direction-dc.jsm"
+python3 - "$tmp/direction-dc.mei" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+directions = [element for element in root.iter() if element.tag.rsplit("}", 1)[-1] == "dir"]
+if len(directions) != 1:
+    raise SystemExit(f"expected one semantic Dir, found {len(directions)}")
+direction = directions[0]
+rendered_text = "".join(
+    "".join(element.itertext())
+    for element in direction.iter()
+    if element.tag.rsplit("}", 1)[-1] == "rend"
+)
+if rendered_text != "D.C.":
+    raise SystemExit("expected D.C. rendered text")
+if direction.attrib.get("staff") != "1" or direction.attrib.get("place") != "below":
+    raise SystemExit("expected D.C. below staff 1")
+if direction.attrib.get("tstamp") != "2":
+    raise SystemExit("expected D.C. at reference-onset timestamp 2")
+if direction.attrib.get("type") != "dacapo":
+    raise SystemExit("expected D.C. navigation type dacapo")
+PY
+
+jq '.score.conductorTrack.measures[0].events = [{
         id:"rehearsal-a", onset:[0,1], duration:[0,1], order:0, kind:"rehearsal", value:"A",
         rehearsal:{enclosure:"circle"}
     }]

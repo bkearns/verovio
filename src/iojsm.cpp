@@ -31,6 +31,7 @@
 #include "caesura.h"
 #include "chord.h"
 #include "clef.h"
+#include "dir.h"
 #include "doc.h"
 #include "dynam.h"
 #include "fermata.h"
@@ -919,19 +920,40 @@ namespace {
             renderedOnce.insert(conductorId);
         }
         else if (kind == "direction") {
-            const JObject *value = ObjectAt(conductor, "value", "/score/conductorTrack/events", false);
-            if (!value || !value->has<jsonxx::String>("dynamic")) {
-                return Fail("JSM_UNSUPPORTED_DIRECTION", "/score/conductorTrack/events/value",
-                    "only direction values with a dynamic string are currently engraved");
+            if (conductor.has<jsonxx::String>("value")) {
+                const std::string value = conductor.get<jsonxx::String>("value");
+                Dir *direction = new Dir();
+                direction->SetTstamp(timestamp);
+                direction->SetPlace(Placement(reference));
+                direction->SetStaff(staffNumbers);
+                Object *textParent = direction;
+                if (value == "D.C.") {
+                    direction->SetType("dacapo");
+                    Rend *rend = new Rend();
+                    rend->SetHalign(HORIZONTALALIGNMENT_right);
+                    direction->AddChild(rend);
+                    textParent = rend;
+                }
+                Text *text = new Text();
+                text->SetText(UTF8to32(value));
+                textParent->AddChild(text);
+                control = direction;
             }
-            Dynam *dynamic = new Dynam();
-            dynamic->SetTstamp(timestamp);
-            dynamic->SetPlace(Placement(reference));
-            dynamic->SetStaff(staffNumbers);
-            Text *text = new Text();
-            text->SetText(UTF8to32(value->get<jsonxx::String>("dynamic")));
-            dynamic->AddChild(text);
-            control = dynamic;
+            else {
+                const JObject *value = ObjectAt(conductor, "value", "/score/conductorTrack/events", false);
+                if (!value || !value->has<jsonxx::String>("dynamic")) {
+                    return Fail("JSM_UNSUPPORTED_DIRECTION", "/score/conductorTrack/events/value",
+                        "expected a direction string or an object with a dynamic string");
+                }
+                Dynam *dynamic = new Dynam();
+                dynamic->SetTstamp(timestamp);
+                dynamic->SetPlace(Placement(reference));
+                dynamic->SetStaff(staffNumbers);
+                Text *text = new Text();
+                text->SetText(UTF8to32(value->get<jsonxx::String>("dynamic")));
+                dynamic->AddChild(text);
+                control = dynamic;
+            }
         }
         else {
             return Fail("JSM_UNSUPPORTED_DIRECTION", "/score/conductorTrack/events/kind", kind);
