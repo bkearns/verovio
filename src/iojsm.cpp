@@ -7,7 +7,7 @@
  * Module: Decode canonical JSM into Verovio's native score model.
  * Correctness: Native JSM and its MusicXML projection engrave identically for supported notation fixtures.
  * Last revised: 2026-07-10
- * Last changed: Added strict native key-signature cancellation engraving.
+ * Last changed: Added strict native event and position spanner engraving.
  */
 
 #include "iojsm.h"
@@ -32,6 +32,7 @@
 #include "doc.h"
 #include "dynam.h"
 #include "fermata.h"
+#include "gliss.h"
 #include "grpsym.h"
 #include "hairpin.h"
 #include "jsonxx.h"
@@ -45,7 +46,9 @@
 #include "metersig.h"
 #include "mrest.h"
 #include "note.h"
+#include "octave.h"
 #include "pb.h"
+#include "pedal.h"
 #include "pgfoot.h"
 #include "pghead.h"
 #include "reh.h"
@@ -62,6 +65,7 @@
 #include "tempo.h"
 #include "text.h"
 #include "tie.h"
+#include "trill.h"
 #include "tuplet.h"
 #include "vrv.h"
 
@@ -446,6 +450,9 @@ struct PendingSpanner {
     const JObject *source = nullptr;
     Measure *measure = nullptr;
     std::string path;
+    std::string partId;
+    int staffNumber = 0;
+    int beatType = 4;
 };
 
 bool ValidateIds(const jsonxx::Value &value, const std::string &path, std::set<std::string> &ids)
@@ -1674,6 +1681,8 @@ bool JsmInput::Import(const std::string &data)
 
     std::map<std::string, std::string> eventTargets;
     std::map<std::string, std::string> toneTargets;
+    std::map<std::string, std::pair<unsigned int, double>> eventTimes;
+    std::map<std::string, double> eventEndTimes;
     std::vector<PendingSpanner> pendingSpanners;
     bool hasEncodedBreaks = false;
     for (unsigned int barIndex = 0; barIndex < bars->size(); ++barIndex) {
@@ -1955,6 +1964,11 @@ bool JsmInput::Import(const std::string &data)
                         if (!StringAt(event, "type", eventPath, type)
                             || !StringAt(event, "id", eventPath, eventId))
                             return false;
+                        eventTimes[eventId]
+                            = { barIndex, static_cast<double>(onset) * InitialBeatType(part) / 4.0 + 1.0 };
+                        eventEndTimes[eventId] = static_cast<double>(onset + eventDuration)
+                                * InitialBeatType(part) / 4.0
+                            + 1.0;
                         const JObject *tupletSpanner = TupletStartingAt(partMeasure, eventId);
                         if (tupletSpanner) {
                             if (activeTuplet) {
@@ -2002,6 +2016,8 @@ bool JsmInput::Import(const std::string &data)
                             element = note;
                             eventTargets[eventId] = eventId;
                             toneTargets[toneId] = eventId;
+                            eventTimes[toneId] = eventTimes[eventId];
+                            eventEndTimes[toneId] = eventEndTimes[eventId];
                         }
                         else if (type == "chord") {
                             const JArray *tones = ArrayAt(event, "tones", eventPath);
@@ -2040,6 +2056,8 @@ bool JsmInput::Import(const std::string &data)
                                 }
                                 chord->AddChild(note);
                                 toneTargets[toneId] = toneId;
+                                eventTimes[toneId] = eventTimes[eventId];
+                                eventEndTimes[toneId] = eventEndTimes[eventId];
                             }
                             element = chord;
                             eventTargets[eventId] = eventId;
@@ -2126,13 +2144,22 @@ bool JsmInput::Import(const std::string &data)
             }
             const JArray *spanners = ArrayAt(partMeasure, "spanners", "/score/parts/measures", false);
             if (spanners) {
+                std::string defaultStaffId;
+                if (!partStaves->has<JObject>(0)
+                    || !StringAt(partStaves->get<JObject>(0), "id", "/score/parts/staves/0", defaultStaffId))
+                    return false;
+                const auto defaultStaff = staffBindings.find(defaultStaffId);
+                if (defaultStaff == staffBindings.end()) {
+                    return Fail("JSM_UNKNOWN_STAFF", "/score/parts/staves/0/id", defaultStaffId);
+                }
                 for (unsigned int i = 0; i < spanners->size(); ++i) {
                     if (!spanners->has<JObject>(i)) {
                         return Fail("JSM_INVALID_SPANNER", "/score/parts/measures/spanners", "expected object");
                     }
                     pendingSpanners.push_back({ &spanners->get<JObject>(i), measure,
                         "/score/parts/" + std::to_string(partIndex) + "/measures/" + std::to_string(barIndex)
-                            + "/spanners/" + std::to_string(i) });
+                            + "/spanners/" + std::to_string(i),
+                        partId, defaultStaff->second.number, InitialBeatType(part) });
                 }
             }
             const JArray *measureEvents = ArrayAt(partMeasure, "measureEvents", "/score/parts/measures", false);
@@ -2181,28 +2208,166 @@ bool JsmInput::Import(const std::string &data)
         const JObject *start = ObjectAt(*pending.source, "start", pending.path);
         const JObject *end = ObjectAt(*pending.source, "end", pending.path);
         if (!start || !end) return false;
-        auto endpoint = [&](const JObject &source, const std::string &path) -> std::string {
-            if (source.has<jsonxx::String>("toneId")) {
-                auto iter = toneTargets.find(source.get<jsonxx::String>("toneId"));
-                if (iter != toneTargets.end()) return iter->second;
-            }
-            if (source.has<jsonxx::String>("eventId")) {
-                auto iter = eventTargets.find(source.get<jsonxx::String>("eventId"));
-                if (iter != eventTargets.end()) return iter->second;
-            }
-            Fail("JSM_UNKNOWN_ENDPOINT", path, "spanner endpoint does not resolve");
-            return {};
+        struct ResolvedEndpoint {
+            bool isEvent = false;
+            std::string id;
+            unsigned int barIndex = 0;
+            double timestamp = 0.0;
+            double endTimestamp = 0.0;
         };
-        const std::string startId = endpoint(*start, pending.path + "/start");
-        const std::string endId = endpoint(*end, pending.path + "/end");
-        if (startId.empty() || endId.empty()) return false;
+        auto endpoint = [&](const JObject &source, const std::string &path, ResolvedEndpoint &result) -> bool {
+            const std::string endpointKind = source.get<jsonxx::String>("kind", "");
+            if (endpointKind == "event") {
+                if (source.has<jsonxx::String>("toneId")) {
+                    auto iter = toneTargets.find(source.get<jsonxx::String>("toneId"));
+                    if (iter != toneTargets.end()) {
+                        result.isEvent = true;
+                        result.id = iter->second;
+                        const auto timing = eventTimes.find(source.get<jsonxx::String>("toneId"));
+                        if (timing != eventTimes.end()) {
+                            result.barIndex = timing->second.first;
+                            result.timestamp = timing->second.second;
+                        }
+                        const auto ending = eventEndTimes.find(source.get<jsonxx::String>("toneId"));
+                        if (ending != eventEndTimes.end()) result.endTimestamp = ending->second;
+                        return true;
+                    }
+                }
+                if (source.has<jsonxx::String>("eventId")) {
+                    auto iter = eventTargets.find(source.get<jsonxx::String>("eventId"));
+                    if (iter != eventTargets.end()) {
+                        result.isEvent = true;
+                        result.id = iter->second;
+                        const auto timing = eventTimes.find(source.get<jsonxx::String>("eventId"));
+                        if (timing != eventTimes.end()) {
+                            result.barIndex = timing->second.first;
+                            result.timestamp = timing->second.second;
+                        }
+                        const auto ending = eventEndTimes.find(source.get<jsonxx::String>("eventId"));
+                        if (ending != eventEndTimes.end()) result.endTimestamp = ending->second;
+                        return true;
+                    }
+                }
+                return Fail("JSM_UNKNOWN_ENDPOINT", path, "event endpoint does not resolve");
+            }
+            if (endpointKind != "position") {
+                return Fail("JSM_UNSUPPORTED_ENDPOINT", path + "/kind", endpointKind);
+            }
+            if (source.get<jsonxx::String>("partId", "") != pending.partId) {
+                return Fail("JSM_SPANNER_OWNERSHIP", path + "/partId", "position belongs to another part");
+            }
+            const std::string endpointBarId = source.get<jsonxx::String>("barId", "");
+            bool foundBar = false;
+            for (unsigned int i = 0; i < bars->size(); ++i) {
+                if (bars->has<JObject>(i)
+                    && bars->get<JObject>(i).get<jsonxx::String>("id", "") == endpointBarId) {
+                    result.barIndex = i;
+                    foundBar = true;
+                    break;
+                }
+            }
+            if (!foundBar) return Fail("JSM_UNKNOWN_ENDPOINT", path + "/barId", endpointBarId);
+            long double onset = 0.0L;
+            if (!RationalAt(source, "onset", path, onset)) return false;
+            if (onset < 0.0L) return Fail("JSM_INVALID_ENDPOINT", path + "/onset", "expected non-negative onset");
+            result.timestamp = static_cast<double>(onset) * pending.beatType / 4.0 + 1.0;
+            return true;
+        };
+        ResolvedEndpoint startEndpoint;
+        ResolvedEndpoint endEndpoint;
+        if (!endpoint(*start, pending.path + "/start", startEndpoint)
+            || !endpoint(*end, pending.path + "/end", endEndpoint))
+            return false;
+
+        if (kind == "pedal") {
+            if (startEndpoint.isEvent || endEndpoint.isEvent) {
+                return Fail("JSM_UNSUPPORTED_ENDPOINT", pending.path, "pedal requires position endpoints");
+            }
+            for (const auto &[resolved, direction] : { std::pair { &startEndpoint, pedalLog_DIR_down },
+                     std::pair { &endEndpoint, pedalLog_DIR_up } }) {
+                Pedal *pedal = new Pedal();
+                pedal->SetID(id + (direction == pedalLog_DIR_down ? "-start" : "-stop"));
+                pedal->SetDir(direction);
+                pedal->SetStaff({ pending.staffNumber });
+                pedal->SetVgrp(2000);
+                pedal->SetTstamp(resolved->timestamp - (direction == pedalLog_DIR_up ? 0.1 : 0.0));
+                pending.measure->AddChild(pedal);
+            }
+            continue;
+        }
+
         ControlElement *spanner = nullptr;
-        if (kind == "tie") spanner = new Tie();
-        else if (kind == "slur") spanner = new Slur();
+        if (kind == "tie") {
+            if (!startEndpoint.isEvent || !endEndpoint.isEvent) {
+                return Fail("JSM_UNSUPPORTED_ENDPOINT", pending.path, "tie requires event endpoints");
+            }
+            Tie *tie = new Tie();
+            const std::string placement = pending.source->get<jsonxx::String>("placement", "auto");
+            if (placement == "above") tie->SetCurvedir(curvature_CURVEDIR_above);
+            else if (placement == "below") tie->SetCurvedir(curvature_CURVEDIR_below);
+            spanner = tie;
+        }
+        else if (kind == "slur") {
+            if (!startEndpoint.isEvent || !endEndpoint.isEvent) {
+                return Fail("JSM_UNSUPPORTED_ENDPOINT", pending.path, "slur requires event endpoints");
+            }
+            Slur *slur = new Slur();
+            const std::string placement = pending.source->get<jsonxx::String>("placement", "auto");
+            if (placement == "above") slur->SetCurvedir(curvature_CURVEDIR_above);
+            else if (placement == "below") slur->SetCurvedir(curvature_CURVEDIR_below);
+            spanner = slur;
+        }
         else if (kind == "hairpin-crescendo" || kind == "hairpin-diminuendo") {
             Hairpin *hairpin = new Hairpin();
             hairpin->SetForm(kind == "hairpin-crescendo" ? hairpinLog_FORM_cres : hairpinLog_FORM_dim);
+            hairpin->SetStaff({ pending.staffNumber });
+            const std::string placement = pending.source->get<jsonxx::String>("placement", "auto");
+            if (placement == "above") hairpin->SetPlace(STAFFREL_above);
+            else if (placement == "below") hairpin->SetPlace(STAFFREL_below);
             spanner = hairpin;
+        }
+        else if (kind == "octave-shift") {
+            Octave *octave = new Octave();
+            const JObject *properties = ObjectAt(*pending.source, "properties", pending.path, false);
+            const std::string direction = properties ? properties->get<jsonxx::String>("direction", "up") : "up";
+            const int size = properties ? IntAt(*properties, "size", 8) : 8;
+            if (size == 8) octave->SetDis(OCTAVE_DIS_8);
+            else if (size == 15) octave->SetDis(OCTAVE_DIS_15);
+            else if (size == 22) octave->SetDis(OCTAVE_DIS_22);
+            else {
+                delete octave;
+                return Fail("JSM_UNSUPPORTED_SPANNER", pending.path + "/properties/size", std::to_string(size));
+            }
+            if (direction == "up") octave->SetDisPlace(STAFFREL_basic_below);
+            else if (direction == "down") octave->SetDisPlace(STAFFREL_basic_above);
+            else {
+                delete octave;
+                return Fail("JSM_UNSUPPORTED_SPANNER", pending.path + "/properties/direction", direction);
+            }
+            octave->SetN(std::to_string(IntAt(*pending.source, "number", 1)));
+            octave->SetStaff({ pending.staffNumber });
+            spanner = octave;
+        }
+        else if (kind == "glissando") {
+            if (!startEndpoint.isEvent || !endEndpoint.isEvent) {
+                return Fail("JSM_UNSUPPORTED_ENDPOINT", pending.path, "glissando requires event endpoints");
+            }
+            Gliss *gliss = new Gliss();
+            gliss->SetN(std::to_string(IntAt(*pending.source, "number", 1)));
+            gliss->SetType("glissando");
+            gliss->SetStaff({ pending.staffNumber });
+            spanner = gliss;
+        }
+        else if (kind == "trill-extension") {
+            if (!startEndpoint.isEvent || !endEndpoint.isEvent) {
+                return Fail("JSM_UNSUPPORTED_ENDPOINT", pending.path, "trill extension requires event endpoints");
+            }
+            Trill *trill = new Trill();
+            trill->SetExtender(BOOLEAN_true);
+            trill->SetLstartsym(LINESTARTENDSYMBOL_none);
+            trill->SetN(std::to_string(IntAt(*pending.source, "number", 1)));
+            trill->SetStaff({ pending.staffNumber });
+            spanner = trill;
         }
         else return Fail("JSM_UNSUPPORTED_SPANNER", pending.path + "/kind", kind);
         spanner->SetID(id);
@@ -2212,8 +2377,33 @@ bool JsmInput::Import(const std::string &data)
             delete spanner;
             return Fail("JSM_INTERNAL", pending.path, "spanner lacks time interface");
         }
-        timeSpan->SetStartid("#" + startId);
-        timeSpan->SetEndid("#" + endId);
+        if (startEndpoint.isEvent && endEndpoint.isEvent) {
+            timeSpan->SetStartid("#" + startEndpoint.id);
+            if (kind == "trill-extension") {
+                if (endEndpoint.barIndex < startEndpoint.barIndex) {
+                    delete spanner;
+                    return Fail("JSM_INVALID_ENDPOINT", pending.path, "end precedes start");
+                }
+                timeSpan->SetTstamp2(
+                    { static_cast<int>(endEndpoint.barIndex - startEndpoint.barIndex), endEndpoint.endTimestamp });
+            }
+            else {
+                timeSpan->SetEndid("#" + endEndpoint.id);
+            }
+        }
+        else if (!startEndpoint.isEvent && !endEndpoint.isEvent) {
+            if (endEndpoint.barIndex < startEndpoint.barIndex) {
+                delete spanner;
+                return Fail("JSM_INVALID_ENDPOINT", pending.path, "end precedes start");
+            }
+            timeSpan->SetTstamp(startEndpoint.timestamp);
+            timeSpan->SetTstamp2(
+                { static_cast<int>(endEndpoint.barIndex - startEndpoint.barIndex), endEndpoint.timestamp });
+        }
+        else {
+            delete spanner;
+            return Fail("JSM_UNSUPPORTED_ENDPOINT", pending.path, "mixed event and position endpoints");
+        }
         pending.measure->AddChild(spanner);
     }
 
