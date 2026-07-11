@@ -233,6 +233,7 @@ namespace {
         if (name == "strong-accent") return ARTICULATION_marc;
         if (name == "marcato") return ARTICULATION_marc;
         if (name == "staccatissimo") return ARTICULATION_stacciss;
+        if (name == "spiccato") return ARTICULATION_spicc;
         return ARTICULATION_NONE;
     }
 
