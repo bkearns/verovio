@@ -295,6 +295,10 @@ namespace {
             if (event->Is(REST) || event->Is(MREST)) {
                 return Fail("JSM_UNSUPPORTED_REST_ARTICULATION", path + "/articulations/" + std::to_string(i), name);
             }
+            if (name == "detached-legato") {
+                result.insert(result.end(), { ARTICULATION_stacc, ARTICULATION_ten });
+                continue;
+            }
             const data_ARTICULATION value = Articulation(name);
             if (value == ARTICULATION_NONE) {
                 return Fail("JSM_UNSUPPORTED_ARTICULATION", path + "/articulations/" + std::to_string(i), name);

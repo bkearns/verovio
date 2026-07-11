@@ -35,6 +35,11 @@ jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].articulations = ["
 "$verovio" -r "$repo/data" -f jsm -o "$tmp/strong-accent.svg" "$tmp/strong-accent.jsm"
 rg -U -q 'class="artic"[^>]*>[[:space:]]*<use[^>]*xlink:href="#E4AC-' "$tmp/strong-accent.svg"
 
+jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].articulations = ["detached-legato"]' \
+    "$fixture" >"$tmp/detached-legato.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/detached-legato.mei" "$tmp/detached-legato.jsm"
+rg -q '<artic[^>]*artic="stacc ten"' "$tmp/detached-legato.mei"
+
 echo "JSM native smoke passed: stable IDs present; written accidentals=$written_accidentals"
 
 jq '.score.conductorTrack.measures[0].events = [{
