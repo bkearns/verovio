@@ -7,16 +7,17 @@
  * Module: Decode canonical JSM into Verovio's native score model.
  * Correctness: Native JSM and its MusicXML projection engrave identically for supported notation fixtures.
  * Last revised: 2026-07-10
- * Last changed: Added exact clef, meter, and measure-boundary context decoding.
+ * Last changed: Added native rendering of preserved MusicXML page credits.
  */
 
 #include "iojsm.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <iomanip>
-#include <map>
 #include <limits>
+#include <map>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -44,6 +45,8 @@
 #include "mrest.h"
 #include "note.h"
 #include "pb.h"
+#include "pgfoot.h"
+#include "pghead.h"
 #include "reh.h"
 #include "rend.h"
 #include "rest.h"
@@ -494,6 +497,72 @@ void AddDocumentHeader(Doc *doc, const JObject &score)
         pugi::xml_node availability = pubStmt.append_child("availability");
         availability.append_child("distributor").text().set(metadata->get<jsonxx::String>("rights").c_str());
     }
+}
+
+std::string ExtensionAttribute(const JObject *attributes, const std::string &name)
+{
+    return (attributes && attributes->has<jsonxx::String>(name)) ? attributes->get<jsonxx::String>(name)
+                                                                  : std::string();
+}
+
+float ExtensionFloatAttribute(const JObject *attributes, const std::string &name)
+{
+    const std::string value = ExtensionAttribute(attributes, name);
+    if (value.empty()) return 0.0F;
+    char *end = nullptr;
+    const float parsed = std::strtof(value.c_str(), &end);
+    return (end == value.c_str()) ? 0.0F : parsed;
+}
+
+void AddPageCredits(Score *score, const JObject &scoreSource)
+{
+    const JObject *metadata = ObjectAt(scoreSource, "metadata", "/score", false);
+    const JObject *extensions = metadata ? ObjectAt(*metadata, "extensions", "/score/metadata", false) : nullptr;
+    const JArray *credits = extensions
+        ? ArrayAt(*extensions, "com.musicstand.musicxml.page-credits", "/score/metadata/extensions", false)
+        : nullptr;
+    if (!credits) return;
+
+    PgHead *head = nullptr;
+    PgFoot *foot = nullptr;
+    for (unsigned int creditIndex = 0; creditIndex < credits->size(); ++creditIndex) {
+        if (!credits->has<JObject>(creditIndex)) continue;
+        const JObject &credit = credits->get<JObject>(creditIndex);
+        const JObject *creditAttributes = ObjectAt(credit, "attributes", "/score/metadata/extensions", false);
+        if (ExtensionAttribute(creditAttributes, "page") != "1") continue;
+        const JArray *items = ArrayAt(credit, "items", "/score/metadata/extensions", false);
+        if (!items) continue;
+        for (unsigned int itemIndex = 0; itemIndex < items->size(); ++itemIndex) {
+            if (!items->has<JObject>(itemIndex)) continue;
+            const JObject &item = items->get<JObject>(itemIndex);
+            if (!item.has<jsonxx::String>("kind") || item.get<jsonxx::String>("kind") != "credit-words") continue;
+            const JObject *attributes = ObjectAt(item, "attributes", "/score/metadata/extensions", false);
+            Rend *rend = new Rend();
+            rend->SetColor(ExtensionAttribute(attributes, "color"));
+            rend->SetHalign(rend->AttHorizontalAlign::StrToHorizontalalignment(
+                ExtensionAttribute(attributes, "justify")));
+            rend->SetValign(
+                rend->AttVerticalAlign::StrToVerticalalignment(ExtensionAttribute(attributes, "valign")));
+            rend->SetFontstyle(
+                rend->AttTypography::StrToFontstyle(ExtensionAttribute(attributes, "font-style")));
+            rend->SetFontweight(
+                rend->AttTypography::StrToFontweight(ExtensionAttribute(attributes, "font-weight")));
+            Text *text = new Text();
+            text->SetText(UTF8to32(item.get<jsonxx::String>("text", "")));
+            rend->AddChild(text);
+            if (ExtensionFloatAttribute(attributes, "default-y") < 0.0F) {
+                if (!foot) foot = new PgFoot();
+                foot->AddChild(rend);
+            }
+            else {
+                if (!head) head = new PgHead();
+                head->SetFunc(PGFUNC_first);
+                head->AddChild(rend);
+            }
+        }
+    }
+    if (head) score->GetScoreDef()->AddChild(head);
+    if (foot) score->GetScoreDef()->AddChild(foot);
 }
 
 int GreatestCommonDivisor(int left, int right)
@@ -1459,6 +1528,7 @@ bool JsmInput::Import(const std::string &data)
     m_doc->AddChild(mdiv);
     Score *score = new Score();
     mdiv->AddChild(score);
+    AddPageCredits(score, *scoreSource);
     Section *section = new Section();
     score->AddChild(section);
     StaffGrp *staffGrp = new StaffGrp();

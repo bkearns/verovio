@@ -60,6 +60,28 @@ if "$verovio" -r "$repo/data" -f jsm -o "$tmp/conflicting-meter.svg" "$tmp/confl
 fi
 rg -q 'JSM_CONFLICTING_METERS' "$tmp/conflicting-meter.log"
 
+jq '.score.metadata.extensions["com.musicstand.musicxml.page-credits"] = [
+    {attributes:{page:"1"}, items:[
+        {kind:"credit-type", attributes:{}, text:"title"},
+        {kind:"credit-words", attributes:{"default-y":"10", justify:"center", valign:"top",
+            color:"#112233", "font-style":"italic", "font-weight":"bold"}, text:"JSM Header"}
+    ]},
+    {attributes:{page:"1"}, items:[
+        {kind:"credit-words", attributes:{"default-y":"-1", justify:"right"}, text:"JSM Footer"}
+    ]},
+    {attributes:{page:"2"}, items:[
+        {kind:"credit-words", attributes:{}, text:"Ignored Later Page"}
+    ]}
+]' "$fixture" >"$tmp/page-credits.jsm"
+"$verovio" -r "$repo/data" -f jsm -t mei -o "$tmp/page-credits.mei" "$tmp/page-credits.jsm"
+rg -U -q '<pgHead[^>]*func="first"[^>]*>[[:space:]]*<rend[^>]*halign="center"[^>]*valign="top"[^>]*color="#112233"[^>]*fontstyle="italic"[^>]*fontweight="bold"[^>]*>JSM Header</rend>' \
+    "$tmp/page-credits.mei"
+rg -U -q '<pgFoot[^>]*>[[:space:]]*<rend[^>]*halign="right"[^>]*>JSM Footer</rend>' "$tmp/page-credits.mei"
+if rg -q 'Ignored Later Page' "$tmp/page-credits.mei"; then
+    echo "page credit from a later page was rendered as a first-page running element" >&2
+    exit 1
+fi
+
 jq '.score.parts[0].measures[0].staves[0].voices[0].events[0].id = "unsafe id"' "$fixture" >"$tmp/unsafe.jsm"
 if "$verovio" -r "$repo/data" -f jsm -o "$tmp/unsafe.svg" "$tmp/unsafe.jsm" >"$tmp/unsafe.log" 2>&1; then
     echo "unsafe ID was accepted" >&2
